@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use thiserror::Error;
 
-#[derive(Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq, Hash)]
 pub struct ModPath(Vec<String>);
 
 impl ModPath {
@@ -61,10 +61,12 @@ enum ModObjCAttr {
 }
 
 impl ModObjCAttr {
-    fn to_origin(&self) -> ObjCOrigin {
+    fn to_objc_repr(&self) -> ObjCRepresented {
         match self {
-            ModObjCAttr::ObjCCore(_) => ObjCOrigin::Core,
-            ModObjCAttr::ObjCFramework { ident, .. } => ObjCOrigin::Framework(ident.to_string()),
+            ModObjCAttr::ObjCCore(_) => ObjCRepresented::Core,
+            ModObjCAttr::ObjCFramework { lit_str, .. } => {
+                ObjCRepresented::Framework(lit_str.value())
+            }
         }
     }
 }
@@ -83,7 +85,7 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-enum ObjCOrigin {
+enum ObjCRepresented {
     Core,
     Framework(String),
 }
@@ -94,17 +96,47 @@ struct ObjCTypeRustLoc {
     mod_path: ModPath,
 }
 
-#[derive(Debug, Default)]
+struct ModContent {
+    rel_path: PathBuf,
+    file: syn::File,
+}
+
+impl std::fmt::Debug for ModContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModContent")
+            .field("rel_path", &self.rel_path)
+            // The file field is so displaying it doesn't bring anything.
+            .field("file", &format_args!("(...)"))
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 struct Mappings {
-    origins: HashMap<ObjCOrigin, ModPath>,
+    base_dir: PathBuf,
+    mods_content: HashMap<ModPath, ModContent>,
+    objc_repr: HashMap<ObjCRepresented, ModPath>,
     interf_traits: HashMap<String, ObjCTypeRustLoc>,
     interf_structs: HashMap<String, ObjCTypeRustLoc>,
     protocols: HashMap<String, ObjCTypeRustLoc>,
 }
 
+impl Mappings {
+    fn new(base_dir: PathBuf) -> Self {
+        Self {
+            base_dir,
+            mods_content: HashMap::new(),
+            objc_repr: HashMap::new(),
+            interf_traits: HashMap::new(),
+            interf_structs: HashMap::new(),
+            protocols: HashMap::new(),
+        }
+    }
+}
+
 struct FileVisit<'a> {
     mod_path: ModPath,
-    file_path: &'a Path,
+    rel_path: &'a Path,
     errs: Vec<ReadError>,
     mappings: &'a mut Mappings,
 }
@@ -112,28 +144,37 @@ struct FileVisit<'a> {
 impl<'a> FileVisit<'a> {
     fn parse_file(
         mappings: &'_ mut Mappings,
-        path: &'_ Path,
+        rel_path: &'_ Path,
         mod_path: ModPath,
     ) -> Result<(), ReadError> {
-        let mut visit = FileVisit {
-            mod_path,
-            file_path: path,
-            errs: Vec::new(),
-            mappings,
-        };
-        let src = match read_file_content(path) {
+        assert!(rel_path.is_relative());
+        let full_path = mappings.base_dir.join(rel_path);
+        let src = match read_file_content(&full_path) {
             Ok(src) => src,
             Err(err) => {
-                return Err(ReadError::IoError(path.to_owned(), err));
+                return Err(ReadError::IoError(full_path.to_owned(), err));
             }
         };
         let parsed_file = match syn::parse_file(&src) {
             Ok(parsed_file) => parsed_file,
             Err(err) => {
-                return Err(ReadError::ParseError(path.to_owned(), err));
+                return Err(ReadError::ParseError(full_path.to_owned(), err));
             }
         };
+        mappings.mods_content.insert(
+            mod_path.clone(),
+            ModContent {
+                rel_path: rel_path.to_owned(),
+                file: parsed_file.clone(),
+            },
+        );
 
+        let mut visit = FileVisit {
+            mod_path,
+            rel_path,
+            errs: Vec::new(),
+            mappings,
+        };
         visit.visit_file(&parsed_file);
         match visit.errs.into_iter().next() {
             Some(err) => Err(err),
@@ -142,13 +183,16 @@ impl<'a> FileVisit<'a> {
     }
 
     fn parse_main_file(path: &'a Path) -> Result<Mappings, ReadError> {
-        let mut mappings = Default::default();
-        Self::parse_file(&mut mappings, path, Default::default())?;
+        let base_dir = path.parent().unwrap().to_owned();
+        let file_rel_path = Path::new(path.file_name().unwrap());
+        let mut mappings = Mappings::new(base_dir);
+        Self::parse_file(&mut mappings, file_rel_path, Default::default())?;
         Ok(mappings)
     }
 
     fn parse_error(&self, err: syn::Error) -> ReadError {
-        ReadError::ParseError(self.file_path.to_owned(), err)
+        let full_path = self.mappings.base_dir.join(self.rel_path);
+        ReadError::ParseError(full_path, err)
     }
 
     fn do_visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) -> Result<(), ReadError> {
@@ -188,21 +232,20 @@ impl<'a> FileVisit<'a> {
                 }
             };
 
-            let origin = res_attr.to_origin();
-            if let Some(dup) = self.mappings.origins.remove(&origin) {
+            let repr = res_attr.to_objc_repr();
+            if let Some(dup) = self.mappings.objc_repr.remove(&repr) {
                 return Err(self.parse_error(syn::Error::new_spanned(
                     attr,
-                    format!("{} already has the same mapping", dup),
+                    format!("{} already stands for the same Objective-C source", dup),
                 )));
             }
-            self.mappings.origins.insert(origin, new_mod_path.clone());
+            self.mappings.objc_repr.insert(repr, new_mod_path.clone());
         }
 
-        let mod_file_path;
         if item_mod.content.is_some() {
             let mut child = FileVisit {
                 mod_path: new_mod_path,
-                file_path: self.file_path,
+                rel_path: self.rel_path,
                 errs: Vec::new(),
                 mappings: self.mappings,
             };
@@ -212,17 +255,18 @@ impl<'a> FileVisit<'a> {
                 None => Ok(()),
             }
         } else {
-            mod_file_path = match resolve_mod_file_path(self.file_path, &ident) {
-                Some(path) => path,
-                None => {
-                    return Err(self.parse_error(syn::Error::new_spanned(
-                        item_mod,
-                        format!("could not find file for {}", ident),
-                    )))
-                }
-            };
+            let mod_file_rel_path =
+                match resolve_mod_file_path(&self.mappings.base_dir, self.rel_path, &ident) {
+                    Some(path) => path,
+                    None => {
+                        return Err(self.parse_error(syn::Error::new_spanned(
+                            item_mod,
+                            format!("could not find file for {}", ident),
+                        )))
+                    }
+                };
 
-            FileVisit::parse_file(self.mappings, &mod_file_path, new_mod_path)
+            FileVisit::parse_file(self.mappings, &mod_file_rel_path, new_mod_path)
         }
     }
 
@@ -334,8 +378,8 @@ impl<'a> FileVisit<'a> {
     }
 }
 
-/// Tries to find the file that `mod [mod_ident];` references to in referencing file `ref_file`.
-fn resolve_mod_file_path(ref_file: &Path, mod_ident: &Ident) -> Option<PathBuf> {
+/// Tries to find the file that `mod [mod_ident];` references to in referencing file `ref_file` in `base_dir`.
+fn resolve_mod_file_path(base_dir: &Path, ref_file: &Path, mod_ident: &Ident) -> Option<PathBuf> {
     let owned_dir_path;
     let dir_path = match ref_file.file_name() {
         Some(name) if name == "lib.rs" || name == "main.rs" => ref_file.parent().unwrap(),
@@ -346,12 +390,12 @@ fn resolve_mod_file_path(ref_file: &Path, mod_ident: &Ident) -> Option<PathBuf> 
     };
 
     let mod_dir_path = dir_path.join(mod_ident.to_string());
-    let mod_file_path = if mod_dir_path.is_dir() {
+    let mod_file_path = if base_dir.join(&mod_dir_path).is_dir() {
         mod_dir_path.join("mod.rs")
     } else {
         mod_dir_path.with_extension("rs")
     };
-    if mod_file_path.is_file() {
+    if base_dir.join(&mod_file_path).is_file() {
         Some(mod_file_path)
     } else {
         None
@@ -375,9 +419,7 @@ impl Visit<'_> for FileVisit<'_> {
 
     fn visit_item_struct(&mut self, item_struct: &'_ syn::ItemStruct) {
         match self.do_visit_item_struct(item_struct) {
-            Err(err) => self
-                .errs
-                .push(ReadError::ParseError(self.file_path.to_owned(), err)),
+            Err(err) => self.errs.push(self.parse_error(err)),
             Ok(()) => {}
         }
     }
