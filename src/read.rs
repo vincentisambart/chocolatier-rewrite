@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use thiserror::Error;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct ModPath(Vec<String>);
 
 impl ModPath {
@@ -25,6 +25,12 @@ impl std::fmt::Display for ModPath {
     }
 }
 
+impl std::fmt::Debug for ModPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ModPath({})", self)
+    }
+}
+
 fn format_parse_err(file_path: &Path, err: &syn::Error) -> String {
     let start = err.span().start();
     format!(
@@ -38,13 +44,8 @@ fn format_parse_err(file_path: &Path, err: &syn::Error) -> String {
 
 #[derive(Error, Debug)]
 pub enum ReadError {
-    #[error("could not find module \"{0}\"")]
-    ModNotFound(ModPath),
     #[error("error reading file {}: {}", .0.display(), .1)]
     IoError(PathBuf, std::io::Error),
-    // TODO: Use ParseError instead of DupMap
-    #[error("module \"{0}\" and \"{0}\" map to the same Objective-C origin")]
-    DupMap(ModPath, ModPath),
     #[error("{}", format_parse_err(.0, .1))]
     ParseError(PathBuf, syn::Error),
 }
@@ -60,17 +61,17 @@ enum ModObjCAttr {
 }
 
 impl ModObjCAttr {
-    fn mod_kind(&self) -> ModKind {
+    fn to_origin(&self) -> ObjCOrigin {
         match self {
-            ModObjCAttr::ObjCCore(_) => ModKind::ObjCCore,
-            ModObjCAttr::ObjCFramework { ident, .. } => ModKind::ObjCFramework(ident.to_string()),
+            ModObjCAttr::ObjCCore(_) => ObjCOrigin::Core,
+            ModObjCAttr::ObjCFramework { ident, .. } => ObjCOrigin::Framework(ident.to_string()),
         }
     }
 }
 
-static MOD_ATTR_NAMES: &[&'static str] = &["objc_core", "objc_framework"];
-static TRAIT_ATTR_NAMES: &[&'static str] = &["objc_interface", "objc_protocol"];
-static STRUCT_ATTR_NAMES: &[&'static str] = &["objc_interface"];
+static MOD_ATTR_NAMES: &[&str] = &["objc_core", "objc_framework"];
+static TRAIT_ATTR_NAMES: &[&str] = &["objc_interface", "objc_protocol"];
+static STRUCT_ATTR_NAMES: &[&str] = &["objc_interface"];
 
 fn read_file_content(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
@@ -82,9 +83,9 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-enum ModKind {
-    ObjCCore,
-    ObjCFramework(String),
+enum ObjCOrigin {
+    Core,
+    Framework(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,89 +96,59 @@ struct ObjCTypeRustLoc {
 
 #[derive(Debug, Default)]
 struct Mappings {
-    mods: HashMap<ModKind, ModPath>,
+    origins: HashMap<ObjCOrigin, ModPath>,
     interf_traits: HashMap<String, ObjCTypeRustLoc>,
     interf_structs: HashMap<String, ObjCTypeRustLoc>,
     protocols: HashMap<String, ObjCTypeRustLoc>,
-}
-
-impl Mappings {
-    fn merge(&mut self, other: Mappings) -> Result<(), ReadError> {
-        for (kind, mod_path) in other.mods {
-            if let Some(dup) = self.mods.remove(&kind) {
-                return Err(ReadError::DupMap(dup, mod_path));
-            }
-            self.mods.insert(kind, mod_path);
-        }
-
-        fn merge_locs(
-            dst: &mut HashMap<String, ObjCTypeRustLoc>,
-            src: HashMap<String, ObjCTypeRustLoc>,
-        ) -> Result<(), ReadError> {
-            for (name, loc) in src {
-                if let Some(dup) = dst.remove(&name) {
-                    return Err(ReadError::DupMap(dup.mod_path, loc.mod_path));
-                }
-                dst.insert(name, loc);
-            }
-            Ok(())
-        }
-        merge_locs(&mut self.interf_structs, other.interf_structs)?;
-        merge_locs(&mut self.interf_traits, other.interf_traits)?;
-        merge_locs(&mut self.protocols, other.protocols)?;
-        Ok(())
-    }
 }
 
 struct FileVisit<'a> {
     mod_path: ModPath,
     file_path: &'a Path,
     errs: Vec<ReadError>,
-    mappings: Mappings,
+    mappings: &'a mut Mappings,
 }
 
 impl<'a> FileVisit<'a> {
-    fn parse_file(path: &'a Path, mod_path: ModPath) -> Self {
+    fn parse_file(
+        mappings: &'_ mut Mappings,
+        path: &'_ Path,
+        mod_path: ModPath,
+    ) -> Result<(), ReadError> {
         let mut visit = FileVisit {
             mod_path,
             file_path: path,
             errs: Vec::new(),
-            mappings: Default::default(),
+            mappings,
         };
         let src = match read_file_content(path) {
             Ok(src) => src,
             Err(err) => {
-                visit.errs.push(ReadError::IoError(path.to_owned(), err));
-                return visit;
+                return Err(ReadError::IoError(path.to_owned(), err));
             }
         };
         let parsed_file = match syn::parse_file(&src) {
             Ok(parsed_file) => parsed_file,
             Err(err) => {
-                visit.errs.push(ReadError::ParseError(path.to_owned(), err));
-                return visit;
+                return Err(ReadError::ParseError(path.to_owned(), err));
             }
         };
 
         visit.visit_file(&parsed_file);
-        visit
+        match visit.errs.into_iter().next() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn parse_main_file(path: &'a Path) -> Result<Mappings, ReadError> {
-        let mut visit = Self::parse_file(path, Default::default());
-        let first_err = visit.errs.drain(..).next();
-        if let Some(first_err) = first_err {
-            Err(first_err)
-        } else {
-            Ok(visit.mappings)
-        }
+        let mut mappings = Default::default();
+        Self::parse_file(&mut mappings, path, Default::default())?;
+        Ok(mappings)
     }
 
-    fn merge<'b>(&mut self, other: FileVisit<'b>) {
-        self.errs.extend(other.errs);
-        if let Err(err) = self.mappings.merge(other.mappings) {
-            self.errs.push(err);
-        }
+    fn parse_error(&self, err: syn::Error) -> ReadError {
+        ReadError::ParseError(self.file_path.to_owned(), err)
     }
 
     fn do_visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) -> Result<(), ReadError> {
@@ -188,22 +159,17 @@ impl<'a> FileVisit<'a> {
             .collect();
 
         if objc_attrs.len() > 1 {
-            return Err(ReadError::ParseError(
-                self.file_path.to_owned(),
-                syn::Error::new_spanned(
-                    objc_attrs[1],
-                    "there should only be one objc_* attribute on a module",
-                ),
-            ));
+            return Err(self.parse_error(syn::Error::new_spanned(
+                objc_attrs[1],
+                "there should only be one objc_* attribute on a module",
+            )));
         }
 
         let ident = &item_mod.ident;
         let new_mod_path = self.mod_path.child(ident.to_string());
 
         if let Some(attr) = objc_attrs.first() {
-            let meta = attr
-                .parse_meta()
-                .map_err(|err| ReadError::ParseError(self.file_path.to_owned(), err))?;
+            let meta = attr.parse_meta().map_err(|err| self.parse_error(err))?;
             let res_attr = match meta {
                 syn::Meta::Path(path) if path.is_ident("objc_core") => {
                     ModObjCAttr::ObjCCore(path.get_ident().unwrap().clone())
@@ -218,40 +184,46 @@ impl<'a> FileVisit<'a> {
                     lit_str,
                 },
                 _ => {
-                    return Err(ReadError::ParseError(
-                        self.file_path.to_owned(),
-                        syn::Error::new_spanned(attr, "invalid attribute"),
-                    ))
+                    return Err(self.parse_error(syn::Error::new_spanned(attr, "invalid attribute")))
                 }
             };
 
-            let mod_kind = res_attr.mod_kind();
-            if let Some(dup) = self.mappings.mods.remove(&mod_kind) {
-                return Err(ReadError::DupMap(dup, new_mod_path));
+            let origin = res_attr.to_origin();
+            if let Some(dup) = self.mappings.origins.remove(&origin) {
+                return Err(self.parse_error(syn::Error::new_spanned(
+                    attr,
+                    format!("{} already has the same mapping", dup),
+                )));
             }
-            self.mappings.mods.insert(mod_kind, new_mod_path.clone());
+            self.mappings.origins.insert(origin, new_mod_path.clone());
         }
 
         let mod_file_path;
-        let child = if item_mod.content.is_some() {
+        if item_mod.content.is_some() {
             let mut child = FileVisit {
                 mod_path: new_mod_path,
                 file_path: self.file_path,
                 errs: Vec::new(),
-                mappings: Default::default(),
+                mappings: self.mappings,
             };
             syn::visit::visit_item_mod(&mut child, item_mod);
-            child
+            match child.errs.into_iter().next() {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
         } else {
             mod_file_path = match resolve_mod_file_path(self.file_path, &ident) {
                 Some(path) => path,
-                None => return Err(ReadError::ModNotFound(new_mod_path)),
+                None => {
+                    return Err(self.parse_error(syn::Error::new_spanned(
+                        item_mod,
+                        format!("could not find file for {}", ident),
+                    )))
+                }
             };
 
-            FileVisit::parse_file(&mod_file_path, new_mod_path)
-        };
-        self.merge(child);
-        Ok(())
+            FileVisit::parse_file(self.mappings, &mod_file_path, new_mod_path)
+        }
     }
 
     fn try_inserting(
@@ -396,9 +368,7 @@ impl Visit<'_> for FileVisit<'_> {
 
     fn visit_item_trait(&mut self, item_trait: &'_ syn::ItemTrait) {
         match self.do_visit_item_trait(item_trait) {
-            Err(err) => self
-                .errs
-                .push(ReadError::ParseError(self.file_path.to_owned(), err)),
+            Err(err) => self.errs.push(self.parse_error(err)),
             Ok(()) => {}
         }
     }
