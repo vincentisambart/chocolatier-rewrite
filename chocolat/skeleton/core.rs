@@ -61,3 +61,26 @@ impl Clone for UntypedObjCPtr {
         unsafe { Self::from_raw_unchecked(raw_ret) }
     }
 }
+
+#[objc_protocol]
+pub trait NSObjectProtocol {
+    fn hash(&self) -> usize {
+        unsafe { objc!(self.hash) }
+    }
+    fn is_equal(&self, obj: Option<&impl ObjCPtr>) -> bool {
+        unsafe { objc!([self isEqual:obj]) }
+    }
+    fn description(&self) -> Option<NSString> {
+        unsafe { objc!([self.description]) }
+    }
+}
+
+#[objc_interface]
+pub trait NSObjectInterface {
+    fn new() -> Self {
+        objc!([Self new])
+    }
+}
+
+#[objc_interface]
+pub struct NSObject;
