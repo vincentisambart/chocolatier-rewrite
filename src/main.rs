@@ -49,7 +49,7 @@ fn run() -> Result<(), RunError> {
         return Err(RunError::ExpectingDir(dst_path.to_owned()));
     }
 
-    read::read_file(&src_path)?;
+    read::read_project(&src_path)?;
 
     Ok(())
 }

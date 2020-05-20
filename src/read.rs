@@ -1,3 +1,4 @@
+use chocolatier_objc_parser::{ast as objc_ast, index as objc_index, xcode};
 use proc_macro2::Ident;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,7 +48,15 @@ pub enum ReadError {
     #[error("error reading file {}: {}", .0.display(), .1)]
     IoError(PathBuf, std::io::Error),
     #[error("{}", format_parse_err(.0, .1))]
-    ParseError(PathBuf, syn::Error),
+    RustParseError(PathBuf, syn::Error),
+    #[error("{}", .0)]
+    ObjCParseError(objc_ast::ParseError),
+}
+
+impl From<objc_ast::ParseError> for ReadError {
+    fn from(err: objc_ast::ParseError) -> Self {
+        ReadError::ObjCParseError(err)
+    }
 }
 
 #[derive(Debug)]
@@ -85,20 +94,20 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-enum ObjCRepresented {
+pub enum ObjCRepresented {
     Core,
     Framework(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ObjCTypeRustLoc {
-    rust_name: String,
-    mod_path: ModPath,
+pub struct ObjCTypeRustLoc {
+    pub rust_name: String,
+    pub mod_path: ModPath,
 }
 
-struct ModContent {
-    rel_path: PathBuf,
-    file: syn::File,
+pub struct ModContent {
+    pub rel_path: PathBuf,
+    pub file: syn::File,
 }
 
 impl std::fmt::Debug for ModContent {
@@ -112,16 +121,16 @@ impl std::fmt::Debug for ModContent {
 }
 
 #[derive(Debug)]
-struct Mappings {
-    base_dir: PathBuf,
-    mods_content: HashMap<ModPath, ModContent>,
-    objc_repr: HashMap<ObjCRepresented, ModPath>,
-    interf_traits: HashMap<String, ObjCTypeRustLoc>,
-    interf_structs: HashMap<String, ObjCTypeRustLoc>,
-    protocols: HashMap<String, ObjCTypeRustLoc>,
+pub struct RustOverview {
+    pub base_dir: PathBuf,
+    pub mods_content: HashMap<ModPath, ModContent>,
+    pub objc_repr: HashMap<ObjCRepresented, ModPath>,
+    pub interf_traits: HashMap<String, ObjCTypeRustLoc>,
+    pub interf_structs: HashMap<String, ObjCTypeRustLoc>,
+    pub protocols: HashMap<String, ObjCTypeRustLoc>,
 }
 
-impl Mappings {
+impl RustOverview {
     fn new(base_dir: PathBuf) -> Self {
         Self {
             base_dir,
@@ -138,17 +147,17 @@ struct FileVisit<'a> {
     mod_path: ModPath,
     rel_path: &'a Path,
     errs: Vec<ReadError>,
-    mappings: &'a mut Mappings,
+    overview: &'a mut RustOverview,
 }
 
 impl<'a> FileVisit<'a> {
     fn parse_file(
-        mappings: &'_ mut Mappings,
+        overview: &'_ mut RustOverview,
         rel_path: &'_ Path,
         mod_path: ModPath,
     ) -> Result<(), ReadError> {
         assert!(rel_path.is_relative());
-        let full_path = mappings.base_dir.join(rel_path);
+        let full_path = overview.base_dir.join(rel_path);
         let src = match read_file_content(&full_path) {
             Ok(src) => src,
             Err(err) => {
@@ -158,10 +167,10 @@ impl<'a> FileVisit<'a> {
         let parsed_file = match syn::parse_file(&src) {
             Ok(parsed_file) => parsed_file,
             Err(err) => {
-                return Err(ReadError::ParseError(full_path.to_owned(), err));
+                return Err(ReadError::RustParseError(full_path.to_owned(), err));
             }
         };
-        mappings.mods_content.insert(
+        overview.mods_content.insert(
             mod_path.clone(),
             ModContent {
                 rel_path: rel_path.to_owned(),
@@ -173,7 +182,7 @@ impl<'a> FileVisit<'a> {
             mod_path,
             rel_path,
             errs: Vec::new(),
-            mappings,
+            overview,
         };
         visit.visit_file(&parsed_file);
         match visit.errs.into_iter().next() {
@@ -182,17 +191,17 @@ impl<'a> FileVisit<'a> {
         }
     }
 
-    fn parse_main_file(path: &'a Path) -> Result<Mappings, ReadError> {
+    fn parse_main_file(path: &'a Path) -> Result<RustOverview, ReadError> {
         let base_dir = path.parent().unwrap().to_owned();
         let file_rel_path = Path::new(path.file_name().unwrap());
-        let mut mappings = Mappings::new(base_dir);
-        Self::parse_file(&mut mappings, file_rel_path, Default::default())?;
-        Ok(mappings)
+        let mut overview = RustOverview::new(base_dir);
+        Self::parse_file(&mut overview, file_rel_path, Default::default())?;
+        Ok(overview)
     }
 
     fn parse_error(&self, err: syn::Error) -> ReadError {
-        let full_path = self.mappings.base_dir.join(self.rel_path);
-        ReadError::ParseError(full_path, err)
+        let full_path = self.overview.base_dir.join(self.rel_path);
+        ReadError::RustParseError(full_path, err)
     }
 
     fn do_visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) -> Result<(), ReadError> {
@@ -233,13 +242,13 @@ impl<'a> FileVisit<'a> {
             };
 
             let repr = res_attr.to_objc_repr();
-            if let Some(dup) = self.mappings.objc_repr.remove(&repr) {
+            if let Some(dup) = self.overview.objc_repr.remove(&repr) {
                 return Err(self.parse_error(syn::Error::new_spanned(
                     attr,
                     format!("{} already stands for the same Objective-C source", dup),
                 )));
             }
-            self.mappings.objc_repr.insert(repr, new_mod_path.clone());
+            self.overview.objc_repr.insert(repr, new_mod_path.clone());
         }
 
         if item_mod.content.is_some() {
@@ -247,7 +256,7 @@ impl<'a> FileVisit<'a> {
                 mod_path: new_mod_path,
                 rel_path: self.rel_path,
                 errs: Vec::new(),
-                mappings: self.mappings,
+                overview: self.overview,
             };
             syn::visit::visit_item_mod(&mut child, item_mod);
             match child.errs.into_iter().next() {
@@ -256,7 +265,7 @@ impl<'a> FileVisit<'a> {
             }
         } else {
             let mod_file_rel_path =
-                match resolve_mod_file_path(&self.mappings.base_dir, self.rel_path, &ident) {
+                match resolve_mod_file_path(&self.overview.base_dir, self.rel_path, &ident) {
                     Some(path) => path,
                     None => {
                         return Err(self.parse_error(syn::Error::new_spanned(
@@ -266,7 +275,7 @@ impl<'a> FileVisit<'a> {
                     }
                 };
 
-            FileVisit::parse_file(self.mappings, &mod_file_rel_path, new_mod_path)
+            FileVisit::parse_file(self.overview, &mod_file_rel_path, new_mod_path)
         }
     }
 
@@ -324,14 +333,14 @@ impl<'a> FileVisit<'a> {
                     &item_trait.ident,
                     &self.mod_path,
                     "Interface",
-                    &mut self.mappings.interf_traits,
+                    &mut self.overview.interf_traits,
                 )?;
             } else if attr.path.is_ident("objc_protocol") {
                 Self::try_inserting(
                     &item_trait.ident,
                     &self.mod_path,
                     "Protocol",
-                    &mut self.mappings.protocols,
+                    &mut self.overview.protocols,
                 )?;
             } else {
                 unreachable!()
@@ -366,7 +375,7 @@ impl<'a> FileVisit<'a> {
                     &item_struct.ident,
                     &self.mod_path,
                     "",
-                    &mut self.mappings.interf_structs,
+                    &mut self.overview.interf_structs,
                 )?;
             } else {
                 unreachable!()
@@ -425,8 +434,35 @@ impl Visit<'_> for FileVisit<'_> {
     }
 }
 
-pub fn read_file(path: &Path) -> Result<(), ReadError> {
-    let mappings = FileVisit::parse_main_file(path)?;
-    dbg!(mappings);
-    Ok(())
+pub struct Overview {
+    pub rust: RustOverview,
+    pub objc_index: objc_index::TypeIndex,
+}
+
+fn parse_objc_needed(overview: &RustOverview) -> Result<objc_index::TypeIndex, ReadError> {
+    use std::fmt::Write;
+
+    let mut objc_code = String::new();
+    for (repr, _) in &overview.objc_repr {
+        match repr {
+            ObjCRepresented::Core => writeln!(&mut objc_code, "#import <objc/NSObject.h>").unwrap(),
+            ObjCRepresented::Framework(name) => {
+                writeln!(&mut objc_code, "#import <{name}/{name}.h>", name = name).unwrap()
+            }
+        }
+    }
+
+    // TODO: Should use multiple targets (should probably be configurable)
+    assert!(cfg!(all(target_os = "macos", target_arch = "x86_64")));
+    let target = xcode::Target::MacOsX86_64;
+    let ast = objc_ast::ast_from_str(target, &objc_code)?;
+    let index = objc_index::TypeIndex::new(&ast);
+
+    Ok(index)
+}
+
+pub fn read_project(main_file: &Path) -> Result<Overview, ReadError> {
+    let rust = FileVisit::parse_main_file(main_file)?;
+    let objc_index = parse_objc_needed(&rust)?;
+    Ok(Overview { rust, objc_index })
 }
