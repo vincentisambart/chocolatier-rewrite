@@ -401,7 +401,7 @@ impl<'a> FileVisit<'a> {
     }
 }
 
-/// Tries to find the file that `mod [mod_ident];` references to in referencing file `ref_file` in `base_dir`.
+/// Tries to find the file that `mod <mod_ident>;` references to in referencing file `ref_file` in `base_dir`.
 fn resolve_mod_file_path(base_dir: &Path, ref_file: &Path, mod_ident: &Ident) -> Option<PathBuf> {
     let owned_dir_path;
     let dir_path = match ref_file.file_name() {
@@ -523,7 +523,7 @@ fn check_origin(
     Ok(())
 }
 
-fn check_origins(overview: &Overview) -> Result<(), ReadError> {
+fn check_validity(overview: &Overview) -> Result<(), ReadError> {
     for (objc_name, loc) in &overview.rust.protocols {
         let make_error = |message: String| make_rust_parse_error(overview, loc, message);
 
@@ -576,6 +576,6 @@ pub fn read_project(main_file: &Path) -> Result<Overview, ReadError> {
     let rust = FileVisit::parse_main_file(main_file)?;
     let objc_index = parse_objc_needed(&rust)?;
     let overview = Overview { rust, objc_index };
-    check_origins(&overview)?;
+    check_validity(&overview)?;
     Ok(overview)
 }
