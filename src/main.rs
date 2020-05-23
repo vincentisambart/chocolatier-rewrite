@@ -2,6 +2,7 @@
 #![allow(clippy::assertions_on_constants)]
 
 mod common;
+mod parse;
 mod read;
 mod skel;
 
