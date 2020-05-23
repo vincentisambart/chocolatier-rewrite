@@ -77,10 +77,7 @@ pub trait NSArrayInterface<T: ObjCPtr> {
 }
 
 #[objc_interface]
-pub struct NSArray<T: ObjCPtr> {
-    ptr: UntypedObjCPtr,
-    _marker: std::marker::PhantomData<T>,
-}
+pub struct NSArray<T: ObjCPtr>;
 
 #[objc_interface]
 impl<T: ObjCPtr> NSArray<T> {
@@ -101,10 +98,7 @@ pub trait NSMutableArrayInterface<T: ObjCPtr> {
 }
 
 #[objc_interface]
-pub struct NSMutableArray<T: ObjCPtr> {
-    ptr: UntypedObjCPtr,
-    _marker: std::marker::PhantomData<T>,
-}
+pub struct NSMutableArray<T: ObjCPtr>;
 
 #[objc_interface]
 impl<T: ObjCPtr> NSMutableArray<T> {

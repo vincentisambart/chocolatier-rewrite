@@ -75,4 +75,14 @@ impl TypeIndex {
             variables,
         }
     }
+
+    pub fn resolve_typedef(&self, name: &str) -> Option<&ast::TypedefDecl> {
+        match self.typedefs.get(name) {
+            Some(def) => match &def.underlying.ty {
+                ast::Type::Typedef(typedef) => self.resolve_typedef(&typedef.name),
+                _ => Some(def),
+            },
+            None => None,
+        }
+    }
 }

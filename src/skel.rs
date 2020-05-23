@@ -26,7 +26,7 @@ impl ModObjCAttr {
 
 static MOD_ATTR_NAMES: &[&str] = &["objc_core", "objc_framework"];
 static TRAIT_ATTR_NAMES: &[&str] = &["objc_interface", "objc_protocol"];
-static STRUCT_ATTR_NAMES: &[&str] = &["objc_interface"];
+static STRUCT_ATTR_NAMES: &[&str] = &["objc_interface", "objc_enum"];
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ObjCOrigin {
@@ -84,6 +84,7 @@ struct FileVisit<'a> {
     mod_for_objc_origin: &'a mut HashMap<ObjCOrigin, ModPath>,
     interf_traits: &'a mut HashMap<String, ObjCTypeRustLoc>,
     interf_structs: &'a mut HashMap<String, ObjCTypeRustLoc>,
+    enum_structs: &'a mut HashMap<String, ObjCTypeRustLoc>,
     protocols: &'a mut HashMap<String, ObjCTypeRustLoc>,
 }
 
@@ -161,6 +162,7 @@ impl<'a> FileVisit<'a> {
                 mod_for_objc_origin: self.mod_for_objc_origin,
                 interf_traits: self.interf_traits,
                 interf_structs: self.interf_structs,
+                enum_structs: self.enum_structs,
                 protocols: self.protocols,
             };
             syn::visit::visit_item_mod(&mut child, item_mod);
@@ -189,6 +191,13 @@ impl<'a> FileVisit<'a> {
 
         if let Some(attr) = objc_attrs.first() {
             let rust_name = item_trait.ident.to_string();
+            let loc = ObjCTypeRustLoc {
+                rust_name: rust_name.clone(),
+                mod_path: self.mod_path.clone(),
+                span: item_trait.ident.span(),
+                file_rel_path: self.file_rel_path.to_owned(),
+            };
+
             if attr.path.is_ident("objc_interface") {
                 let objc_name = match strip_suffix(&rust_name, "Interface") {
                     Some(objc_name) => objc_name,
@@ -203,12 +212,6 @@ impl<'a> FileVisit<'a> {
                     }
                 };
 
-                let loc = ObjCTypeRustLoc {
-                    rust_name: rust_name.clone(),
-                    mod_path: self.mod_path.clone(),
-                    span: item_trait.ident.span(),
-                    file_rel_path: self.file_rel_path.to_owned(),
-                };
                 if let Some(existing_loc) = self.interf_traits.get(objc_name) {
                     if loc.same_module_and_name(existing_loc) {
                         return Err(self.err_at_loc(
@@ -236,12 +239,6 @@ impl<'a> FileVisit<'a> {
                     }
                 };
 
-                let loc = ObjCTypeRustLoc {
-                    rust_name: rust_name.clone(),
-                    mod_path: self.mod_path.clone(),
-                    span: item_trait.ident.span(),
-                    file_rel_path: self.file_rel_path.to_owned(),
-                };
                 if let Some(existing_loc) = self.protocols.get(objc_name) {
                     if loc.same_module_and_name(existing_loc) {
                         return Err(self.err_at_loc(
@@ -285,13 +282,25 @@ impl<'a> FileVisit<'a> {
         if let Some(attr) = objc_attrs.first() {
             // For Rust structs, the Rust name is the same as the ObjC one.
             let name = item_struct.ident.to_string();
+
+            if !matches!(&item_struct.fields, syn::Fields::Unit) {
+                return Err(self.err_at_loc(
+                    &item_struct.ident,
+                    format!(
+                        "{} and all other Objective-C mapped structs should not declare any field",
+                        name
+                    ),
+                ));
+            }
+
+            let loc = ObjCTypeRustLoc {
+                rust_name: name.clone(),
+                mod_path: self.mod_path.clone(),
+                span: item_struct.ident.span(),
+                file_rel_path: self.file_rel_path.to_owned(),
+            };
+
             if attr.path.is_ident("objc_interface") {
-                let loc = ObjCTypeRustLoc {
-                    rust_name: name.clone(),
-                    mod_path: self.mod_path.clone(),
-                    span: item_struct.ident.span(),
-                    file_rel_path: self.file_rel_path.to_owned(),
-                };
                 if let Some(existing_loc) = self.interf_structs.get(&name) {
                     if loc.same_module_and_name(existing_loc) {
                         return Err(self.err_at_loc(
@@ -304,6 +313,20 @@ impl<'a> FileVisit<'a> {
                     }
                 } else {
                     self.interf_structs.insert(name, loc);
+                }
+            } else if attr.path.is_ident("objc_enum") {
+                if let Some(existing_loc) = self.enum_structs.get(&name) {
+                    if loc.same_module_and_name(existing_loc) {
+                        return Err(self.err_at_loc(
+                            &item_struct.ident,
+                            format!(
+                                "{} is already mapped to {}::{}",
+                                name, existing_loc.mod_path, existing_loc.rust_name
+                            ),
+                        ));
+                    }
+                } else {
+                    self.enum_structs.insert(name, loc);
                 }
             } else {
                 unreachable!()
@@ -356,6 +379,7 @@ pub struct RustOverview {
     pub mod_for_objc_origin: HashMap<ObjCOrigin, ModPath>,
     pub interf_traits: HashMap<String, ObjCTypeRustLoc>,
     pub interf_structs: HashMap<String, ObjCTypeRustLoc>,
+    pub enum_structs: HashMap<String, ObjCTypeRustLoc>,
     pub protocols: HashMap<String, ObjCTypeRustLoc>,
 }
 
@@ -364,6 +388,7 @@ impl RustOverview {
         let mut mod_for_objc_origin = HashMap::new();
         let mut interf_traits = HashMap::new();
         let mut interf_structs = HashMap::new();
+        let mut enum_structs = HashMap::new();
         let mut protocols = HashMap::new();
 
         for mod_content in &crate_content.content {
@@ -375,6 +400,7 @@ impl RustOverview {
                 mod_for_objc_origin: &mut mod_for_objc_origin,
                 interf_traits: &mut interf_traits,
                 interf_structs: &mut interf_structs,
+                enum_structs: &mut enum_structs,
                 protocols: &mut protocols,
             };
             syn::visit::visit_file(&mut visit, &mod_content.file);
@@ -388,6 +414,7 @@ impl RustOverview {
             mod_for_objc_origin,
             interf_traits,
             interf_structs,
+            enum_structs,
             protocols,
         })
     }
@@ -518,6 +545,50 @@ fn check_validity(overview: &Overview) -> Result<()> {
                 ),
             ));
         }
+    }
+
+    for (objc_name, loc) in &overview.rust.enum_structs {
+        use objc_ast::{TagId, TagKind, TagRef, Type};
+
+        let objc_origin = match overview.objc_index.resolve_typedef(objc_name) {
+            Some(def) => match def.underlying.ty {
+                Type::Tag(TagRef {
+                    kind: TagKind::Enum,
+                    ..
+                })
+                | Type::Num(_) => {
+                    // The resolved typedef might be multi-level deep (NSStringEncoding->NSUInteger->unsigned long),
+                    // but we want the origin of the first level.
+                    overview
+                        .objc_index
+                        .typedefs
+                        .get(objc_name)
+                        .unwrap()
+                        .origin
+                        .clone()
+                }
+                _ => {
+                    return Err(loc.err_in_dir(
+                        base_dir,
+                        format!("{} is not an enum in Objective-C - {:?}", objc_name, def),
+                    ));
+                }
+            },
+            None => {
+                let tag_id = TagId::Named(objc_name.clone());
+                match overview.objc_index.enums.get(&tag_id) {
+                    Some(def) => def.origin.clone(),
+                    None => {
+                        return Err(loc.err_in_dir(
+                            base_dir,
+                            format!("could not find enum {} in Objective-C", objc_name),
+                        ))
+                    }
+                }
+            }
+        };
+
+        check_origin(overview, "enum", &objc_name, &loc, &objc_origin)?;
     }
 
     Ok(())
