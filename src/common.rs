@@ -144,7 +144,7 @@ impl std::fmt::Display for ModPath {
         if self.0.is_empty() {
             f.write_str("crate")
         } else {
-            f.write_str(&self.0.join("::"))
+            write!(f, "crate::{}", self.0.join("::"))
         }
     }
 }

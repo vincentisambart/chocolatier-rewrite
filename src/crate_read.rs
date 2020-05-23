@@ -11,6 +11,7 @@ pub struct ModContent {
 impl std::fmt::Debug for ModContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModContent")
+            .field("mod_path", &self.mod_path)
             .field("file_rel_path", &self.file_rel_path)
             // The file field is so displaying it doesn't bring anything.
             .field("file", &format_args!("(...)"))
