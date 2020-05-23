@@ -92,12 +92,12 @@ impl<'a> FileVisit<'a> {
         Error::syn_err_rel(err, &self.base_dir, self.file_rel_path)
     }
 
-    fn loc_err<Spanned, IntoString>(&self, spanned: Spanned, message: IntoString) -> Error
+    fn err_at_loc<Spanned, IntoString>(&self, spanned: Spanned, message: IntoString) -> Error
     where
         IntoString: Into<String>,
         Spanned: syn::spanned::Spanned,
     {
-        Error::loc_err(self.full_file_path(), spanned, message)
+        Error::at_loc(self.full_file_path(), spanned, message)
     }
 
     fn do_visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) -> Result<()> {
@@ -108,7 +108,7 @@ impl<'a> FileVisit<'a> {
             .collect();
 
         if objc_attrs.len() > 1 {
-            return Err(self.loc_err(
+            return Err(self.err_at_loc(
                 objc_attrs[1],
                 "there should only be one objc_* attribute on a module",
             ));
@@ -133,13 +133,13 @@ impl<'a> FileVisit<'a> {
                     lit_str,
                 },
                 _ => {
-                    return Err(self.loc_err(attr, "invalid attribute"));
+                    return Err(self.err_at_loc(attr, "invalid attribute"));
                 }
             };
 
             let origin = res_attr.to_objc_origin();
             if let Some(dup) = self.mod_for_objc_origin.remove(&origin) {
-                return Err(self.loc_err(
+                return Err(self.err_at_loc(
                     attr,
                     format!("{} already stands for the same Objective-C source", dup),
                 ));
@@ -177,7 +177,7 @@ impl<'a> FileVisit<'a> {
             .collect();
 
         if objc_attrs.len() > 1 {
-            return Err(self.loc_err(
+            return Err(self.err_at_loc(
                 objc_attrs[1],
                 "there should only be one objc_* attribute on a trait",
             ));
@@ -189,8 +189,7 @@ impl<'a> FileVisit<'a> {
                 let objc_name = match strip_suffix(&rust_name, "Interface") {
                     Some(objc_name) => objc_name,
                     None => {
-                        return Err(Error::loc_err(
-                            self.full_file_path(),
+                        return Err(self.err_at_loc(
                             attr,
                             format!(
                                 "\"{}\" is tagged #[objc_interface] so its name should end with \"Interface\"",
@@ -208,7 +207,7 @@ impl<'a> FileVisit<'a> {
                 };
                 if let Some(existing_loc) = self.interf_traits.get(objc_name) {
                     if loc.same_module_and_name(existing_loc) {
-                        return Err(self.loc_err(
+                        return Err(self.err_at_loc(
                             &item_trait.ident,
                             format!(
                                 "{} is already mapped to {}::{}",
@@ -223,8 +222,7 @@ impl<'a> FileVisit<'a> {
                 let objc_name = match strip_suffix(&rust_name, "Protocol") {
                     Some(without_suffix) => without_suffix,
                     None => {
-                        return Err(Error::loc_err(
-                            self.full_file_path(),
+                        return Err(self.err_at_loc(
                             attr,
                             format!(
                                 "\"{}\" is tagged #[objc_protocol] so its name should end with \"Protocol\"",
@@ -242,7 +240,7 @@ impl<'a> FileVisit<'a> {
                 };
                 if let Some(existing_loc) = self.protocols.get(objc_name) {
                     if loc.same_module_and_name(existing_loc) {
-                        return Err(self.loc_err(
+                        return Err(self.err_at_loc(
                             &item_trait.ident,
                             format!(
                                 "{} is already mapped to {}::{}",
@@ -274,7 +272,7 @@ impl<'a> FileVisit<'a> {
             .collect();
 
         if objc_attrs.len() > 1 {
-            return Err(self.loc_err(
+            return Err(self.err_at_loc(
                 objc_attrs[1],
                 "there should only be one objc_* attribute on a trait",
             ));
@@ -292,7 +290,7 @@ impl<'a> FileVisit<'a> {
                 };
                 if let Some(existing_loc) = self.interf_structs.get(&name) {
                     if loc.same_module_and_name(existing_loc) {
-                        return Err(self.loc_err(
+                        return Err(self.err_at_loc(
                             &item_struct.ident,
                             format!(
                                 "{} is already mapped to {}::{}",
@@ -419,7 +417,7 @@ fn parse_objc_needed(overview: &RustOverview) -> Result<objc_index::TypeIndex> {
 }
 
 fn make_rust_parse_error(overview: &Overview, loc: &ObjCTypeRustLoc, message: String) -> Error {
-    Error::loc_err(
+    Error::at_loc(
         overview
             .rust
             .crate_content
@@ -474,48 +472,56 @@ fn check_origin(
 
 fn check_validity(overview: &Overview) -> Result<()> {
     for (objc_name, loc) in &overview.rust.protocols {
-        let make_error = |message: String| make_rust_parse_error(overview, loc, message);
-
         let def = match overview.objc_index.protocols.get(objc_name) {
             Some(def) => def,
             None => {
-                return Err(make_error(format!(
-                    "could not find @protocol {} in Objective-C",
-                    objc_name
-                )))
+                return Err(make_rust_parse_error(
+                    overview,
+                    loc,
+                    format!("could not find @protocol {} in Objective-C", objc_name),
+                ))
             }
         };
         check_origin(overview, "@protocol", &objc_name, &loc, &def.origin)?;
     }
 
     for (objc_name, loc) in &overview.rust.interf_traits {
-        let make_error = |message: String| make_rust_parse_error(overview, loc, message);
-
         let def = match overview.objc_index.interfaces.get(objc_name) {
             Some(def) => def,
             None => {
-                return Err(make_error(format!(
-                    "could not find @interface {} in Objective-C",
-                    objc_name
-                )))
+                return Err(make_rust_parse_error(
+                    overview,
+                    loc,
+                    format!("could not find @interface {} in Objective-C", objc_name),
+                ))
             }
         };
         check_origin(overview, "@interface", &objc_name, &loc, &def.origin)?;
     }
 
     for (objc_name, loc) in &overview.rust.interf_structs {
-        let make_error = |message: String| make_rust_parse_error(overview, loc, message);
-
         let def = match overview.objc_index.interfaces.get(objc_name) {
             Some(def) => def,
             None => {
-                return Err(make_error(format!(
-                    "could not find @interface {} in Objective-C",
-                    objc_name
-                )))
+                return Err(make_rust_parse_error(
+                    overview,
+                    loc,
+                    format!("could not find @interface {} in Objective-C", objc_name),
+                ))
             }
         };
         check_origin(overview, "@interface", &objc_name, &loc, &def.origin)?;
+
+        if overview.rust.interf_traits.get(objc_name).is_none() {
+            return Err(make_rust_parse_error(
+                overview,
+                loc,
+                format!(
+                    "could not find any `#[objc_interface] trait {}Interface` definition",
+                    objc_name
+                ),
+            ));
+        }
     }
 
     Ok(())

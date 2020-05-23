@@ -79,7 +79,7 @@ impl Error {
         }
     }
 
-    pub fn file_err<IntoPathBuf, IntoString>(path: IntoPathBuf, message: IntoString) -> Self
+    pub fn in_file<IntoPathBuf, IntoString>(path: IntoPathBuf, message: IntoString) -> Self
     where
         IntoPathBuf: Into<PathBuf>,
         IntoString: Into<String>,
@@ -93,7 +93,7 @@ impl Error {
         }
     }
 
-    pub fn loc_err<IntoPathBuf, Spanned, IntoString>(
+    pub fn at_loc<IntoPathBuf, Spanned, IntoString>(
         path: IntoPathBuf,
         spanned: Spanned,
         message: IntoString,
@@ -111,14 +111,21 @@ impl Error {
             message: message.into(),
         }
     }
+
+    fn generic<IntoString>(message: IntoString) -> Self
+    where
+        IntoString: Into<String>,
+    {
+        Self {
+            loc: None,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<chocolatier_objc_parser::ast::ParseError> for Error {
     fn from(err: chocolatier_objc_parser::ast::ParseError) -> Self {
-        Self {
-            loc: None,
-            message: err.to_string(),
-        }
+        Self::generic(err.to_string())
     }
 }
 

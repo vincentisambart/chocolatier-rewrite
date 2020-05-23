@@ -47,7 +47,7 @@ impl CrateContent {
         assert!(file_rel_path.is_relative());
         let full_path = self.base_dir.join(file_rel_path);
         if !full_path.exists() {
-            return Err(Error::file_err(
+            return Err(Error::in_file(
                 full_path,
                 format!(
                     "should exist and contain the content for module {}",
@@ -79,14 +79,14 @@ impl CrateContent {
 
     pub fn read_crate(path: &Path) -> Result<Self> {
         if !path.exists() {
-            return Err(Error::file_err(path, "not found"));
+            return Err(Error::in_file(path, "not found"));
         }
         let extended_path;
         let parent_dir;
         let (base_dir, file_path) = if path.is_dir() {
             extended_path = path.join("lib.rs");
             if !extended_path.exists() {
-                return Err(Error::file_err(
+                return Err(Error::in_file(
                     extended_path,
                     "expected to exist and contain the root of the crate",
                 ));
@@ -96,7 +96,7 @@ impl CrateContent {
             match path.file_name() {
                 Some(file_name) if file_name == "lib.rs" => {}
                 _ => {
-                    return Err(Error::file_err(
+                    return Err(Error::in_file(
                         path,
                         "should be the root file (lib.rs) of the crate",
                     ))
