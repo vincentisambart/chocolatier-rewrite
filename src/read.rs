@@ -400,7 +400,7 @@ fn parse_objc_needed(overview: &RustOverview) -> Result<objc_index::TypeIndex> {
     use std::fmt::Write;
 
     let mut objc_code = String::new();
-    for (origin, _) in &overview.mod_for_objc_origin {
+    for origin in overview.mod_for_objc_origin.keys() {
         match origin {
             ObjCOrigin::Core => writeln!(&mut objc_code, "#import <objc/NSObject.h>").unwrap(),
             ObjCOrigin::Framework(name) => {

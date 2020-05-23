@@ -121,12 +121,11 @@ fn resolve_mod_file_path(base_dir: &Path, mod_path: &ModPath) -> PathBuf {
     assert!(!mod_path.0.is_empty());
     let mod_dir_path = mod_path.0.join("/");
     let mod_dir_path = Path::new(&mod_dir_path);
-    let mod_file_path = if base_dir.join(&mod_dir_path).is_dir() {
+    if base_dir.join(&mod_dir_path).is_dir() {
         mod_dir_path.join("mod.rs")
     } else {
         mod_dir_path.with_extension("rs")
-    };
-    mod_file_path
+    }
 }
 
 impl Visit<'_> for FileVisit<'_> {

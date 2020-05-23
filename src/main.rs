@@ -1,4 +1,5 @@
 #![warn(rust_2018_idioms)]
+#![allow(clippy::assertions_on_constants)]
 
 mod common;
 mod crate_read;
