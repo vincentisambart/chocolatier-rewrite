@@ -71,7 +71,7 @@ pub trait NSObjectProtocol {
         unsafe { objc!([self isEqual:obj]) }
     }
     fn description(&self) -> Option<NSString> {
-        unsafe { objc!([self.description]) }
+        unsafe { objc!(self.description) }
     }
 }
 

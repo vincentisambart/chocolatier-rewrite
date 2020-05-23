@@ -52,13 +52,13 @@ pub trait NSArrayInterface<T: ObjCPtr> {
         unsafe { objc!(self.lastObject) }
     }
     fn object_at(&self, index: usize) -> T {
-        unsafe { objc![self objectAtIndex:index] }
+        unsafe { objc!([self objectAtIndex:index]) }
     }
     fn count(&self) -> usize {
-        unsafe { objc![self count] }
+        unsafe { objc!(self.count) }
     }
     fn adding_object<U: Into<T> + ObjCPtr>(&self, object: &U) -> NSArray<T> {
-        unsafe { objc![self arrayByAddingObject:object] }
+        unsafe { objc!([self arrayByAddingObject:object]) }
     }
     fn enumerate_objects<F: FnMut(T, usize, &mut bool) + Clone>(&self, f: F) {
         // TODO: thread check should maybe be done at the runtime level if block not Send + Sync?
@@ -72,7 +72,7 @@ pub trait NSArrayInterface<T: ObjCPtr> {
                 *stop_ptr = 1;
             }
         };
-        unsafe { very_unsafe_objc![self enumerateObjectsUsingBlock:block] }
+        unsafe { very_unsafe_objc!([self enumerateObjectsUsingBlock:block]) }
     }
 }
 
@@ -85,18 +85,18 @@ pub struct NSArray<T: ObjCPtr> {
 #[objc_interface]
 impl<T: ObjCPtr> NSArray<T> {
     pub fn new() -> Self {
-        unsafe { objc![Self new] }
+        unsafe { objc!([Self new]) }
     }
 }
 
 #[objc_interface]
 pub trait NSMutableArrayInterface<T: ObjCPtr> {
     fn add_object<U: Into<T> + ObjCPtr>(&self, object: &U) {
-        unsafe { objc![Self addObject:U] }
+        unsafe { objc!([Self addObject:U]) }
     }
 
     fn insert_object_at<U: Into<T> + ObjCPtr>(&self, object: &U, index: usize) {
-        unsafe { objc![Self insertObject:object atIndex:index] }
+        unsafe { objc!([Self insertObject:object atIndex:index]) }
     }
 }
 
