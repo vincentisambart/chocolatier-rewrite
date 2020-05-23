@@ -2,8 +2,8 @@
 #![allow(clippy::assertions_on_constants)]
 
 mod common;
-mod crate_read;
 mod read;
+mod skel;
 
 use common::{Error, Result};
 use std::path::Path;
@@ -24,7 +24,7 @@ fn run() -> Result<()> {
         return Err(Error::expected_dir(dst_path));
     }
 
-    read::read_project(&src_path)?;
+    skel::read_skeleton(&src_path)?;
 
     Ok(())
 }
