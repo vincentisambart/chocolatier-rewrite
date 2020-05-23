@@ -46,6 +46,10 @@ impl ObjCTypeRustLoc {
     fn same_module_and_name(&self, other: &Self) -> bool {
         self.rust_name == other.rust_name && self.mod_path == other.mod_path
     }
+
+    fn err_in_dir(&self, base_dir: &Path, message: String) -> Error {
+        Error::at_loc(base_dir.join(&self.file_rel_path), self.span, message)
+    }
 }
 
 pub struct ModContent {
@@ -416,18 +420,6 @@ fn parse_objc_needed(overview: &RustOverview) -> Result<objc_index::TypeIndex> {
     Ok(index)
 }
 
-fn make_rust_parse_error(overview: &Overview, loc: &ObjCTypeRustLoc, message: String) -> Error {
-    Error::at_loc(
-        overview
-            .rust
-            .crate_content
-            .base_dir
-            .join(&loc.file_rel_path),
-        loc.span,
-        message,
-    )
-}
-
 fn check_origin(
     overview: &Overview,
     kind: &str,
@@ -435,7 +427,7 @@ fn check_origin(
     loc: &ObjCTypeRustLoc,
     objc_origin: &Option<objc_ast::Origin>,
 ) -> Result<()> {
-    let make_error = |message: String| make_rust_parse_error(overview, loc, message);
+    let base_dir = &overview.rust.crate_content.base_dir;
 
     let origin = match objc_origin {
         None | Some(objc_ast::Origin::System) => return Ok(()),
@@ -450,10 +442,13 @@ fn check_origin(
                 ObjCOrigin::Core => "by the Objective-C runtime".to_owned(),
                 ObjCOrigin::Framework(name) => format!("in the Objective-C framework {}", name),
             };
-            return Err(make_error(format!(
-                "{} {} is defined {}, but could not find the module where it should go",
-                kind, objc_name, origin_text
-            )));
+            return Err(loc.err_in_dir(
+                base_dir,
+                format!(
+                    "{} {} is defined {}, but could not find the module where it should go",
+                    kind, objc_name, origin_text
+                ),
+            ));
         }
     };
     if mod_path_expected != &loc.mod_path {
@@ -461,23 +456,27 @@ fn check_origin(
             ObjCOrigin::Core => "by the Objective-C runtime".to_owned(),
             ObjCOrigin::Framework(name) => format!("in the Objective-C framework {}", name),
         };
-        return Err(make_error(format!(
-            "expected {}::{} to be declared in module {}, as the {} {} is declared {}",
-            loc.mod_path, loc.rust_name, mod_path_expected, kind, objc_name, origin_text
-        )));
+        return Err(loc.err_in_dir(
+            base_dir,
+            format!(
+                "expected {}::{} to be declared in module {}, as the {} {} is declared {}",
+                loc.mod_path, loc.rust_name, mod_path_expected, kind, objc_name, origin_text
+            ),
+        ));
     }
 
     Ok(())
 }
 
 fn check_validity(overview: &Overview) -> Result<()> {
+    let base_dir = &overview.rust.crate_content.base_dir;
+
     for (objc_name, loc) in &overview.rust.protocols {
         let def = match overview.objc_index.protocols.get(objc_name) {
             Some(def) => def,
             None => {
-                return Err(make_rust_parse_error(
-                    overview,
-                    loc,
+                return Err(loc.err_in_dir(
+                    base_dir,
                     format!("could not find @protocol {} in Objective-C", objc_name),
                 ))
             }
@@ -489,9 +488,8 @@ fn check_validity(overview: &Overview) -> Result<()> {
         let def = match overview.objc_index.interfaces.get(objc_name) {
             Some(def) => def,
             None => {
-                return Err(make_rust_parse_error(
-                    overview,
-                    loc,
+                return Err(loc.err_in_dir(
+                    base_dir,
                     format!("could not find @interface {} in Objective-C", objc_name),
                 ))
             }
@@ -503,9 +501,8 @@ fn check_validity(overview: &Overview) -> Result<()> {
         let def = match overview.objc_index.interfaces.get(objc_name) {
             Some(def) => def,
             None => {
-                return Err(make_rust_parse_error(
-                    overview,
-                    loc,
+                return Err(loc.err_in_dir(
+                    base_dir,
                     format!("could not find @interface {} in Objective-C", objc_name),
                 ))
             }
@@ -513,9 +510,8 @@ fn check_validity(overview: &Overview) -> Result<()> {
         check_origin(overview, "@interface", &objc_name, &loc, &def.origin)?;
 
         if overview.rust.interf_traits.get(objc_name).is_none() {
-            return Err(make_rust_parse_error(
-                overview,
-                loc,
+            return Err(loc.err_in_dir(
+                base_dir,
                 format!(
                     "could not find any `#[objc_interface] trait {}Interface` definition",
                     objc_name
