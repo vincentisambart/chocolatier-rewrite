@@ -36,34 +36,18 @@ pub enum ObjCOrigin {
 
 #[derive(Debug)]
 pub struct ObjCTypeRustLoc {
-    pub rust_name: String,
+    pub path: RustEntityPath,
     pub span: proc_macro2::Span,
     pub file_rel_path: PathBuf,
-    pub mod_path: ModPath,
 }
 
 impl ObjCTypeRustLoc {
-    fn same_module_and_name(&self, other: &Self) -> bool {
-        self.rust_name == other.rust_name && self.mod_path == other.mod_path
+    fn same_path(&self, other: &Self) -> bool {
+        self.path == other.path
     }
 
     fn err_in_dir(&self, base_dir: &Path, message: String) -> Error {
         Error::at_loc(base_dir.join(&self.file_rel_path), self.span, message)
-    }
-}
-
-pub struct ModContent {
-    pub file_rel_path: PathBuf,
-    pub file: syn::File,
-}
-
-impl std::fmt::Debug for ModContent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ModContent")
-            .field("file_rel_path", &self.file_rel_path)
-            // The file field is so displaying it doesn't bring anything.
-            .field("file", &format_args!("(...)"))
-            .finish()
     }
 }
 
@@ -76,16 +60,160 @@ fn strip_suffix<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ObjCEntity {
+    Protocol(String),
+    Interface(String),
+    Enum(String),
+}
+
+struct ObjCMacroVisit<'a> {
+    base_dir: &'a Path,
+    file_rel_path: &'a Path,
+    mod_path: &'a ModPath,
+    err: Option<Error>,
+    objc_entity: Option<&'a ObjCEntity>,
+    index: &'a mut Index,
+}
+
+impl ObjCMacroVisit<'_> {
+    fn full_file_path(&self) -> PathBuf {
+        self.base_dir.join(self.file_rel_path)
+    }
+
+    fn syn_err(&self, err: syn::Error) -> Error {
+        Error::syn_err_rel(err, &self.base_dir, self.file_rel_path)
+    }
+
+    fn err_at_loc<Spanned, IntoString>(&self, spanned: Spanned, message: IntoString) -> Error
+    where
+        IntoString: Into<String>,
+        Spanned: syn::spanned::Spanned,
+    {
+        Error::at_loc(self.full_file_path(), spanned, message)
+    }
+
+    fn do_visit_expr_macro(&mut self, expr_mac: &'_ syn::ExprMacro) -> Result<()> {
+        if !expr_mac.mac.path.is_ident("objc") {
+            syn::visit::visit_expr_macro(self, expr_mac);
+            return Ok(());
+        }
+
+        let entity = match &self.objc_entity {
+            Some(user) => user,
+            None => {
+                return Err(self.err_at_loc(
+                    expr_mac,
+                    "objc!() can only be used in #[objc_*] marked impl",
+                ))
+            }
+        };
+
+        // Note that we do not support nesting of objc!(),
+        // as it increases complexity and is probably not useful.
+        // You can do some limited nesting of ObjC calls though: objc!([[Self alloc] init])
+
+        let _objc_expr: crate::parse::ObjCExpr =
+            expr_mac.mac.parse_body().map_err(|err| self.syn_err(err))?;
+
+        // TODO
+
+        Ok(())
+    }
+}
+
+impl Visit<'_> for ObjCMacroVisit<'_> {
+    fn visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) {
+        if self.err.is_some() {
+            return;
+        }
+
+        let new_mod_path = self.mod_path.child(item_mod.ident.to_string());
+        let mut child = ObjCMacroVisit {
+            base_dir: self.base_dir,
+            file_rel_path: self.file_rel_path,
+            mod_path: &new_mod_path,
+            err: None,
+            objc_entity: self.objc_entity,
+            index: self.index,
+        };
+        syn::visit::visit_item_mod(&mut child, item_mod);
+        self.err = child.err;
+    }
+
+    fn visit_item_impl(&mut self, item_impl: &'_ syn::ItemImpl) {
+        if self.err.is_some() {
+            return;
+        }
+
+        let entity_path = match &*item_impl.self_ty {
+            syn::Type::Path(path) => RustEntityPath::from_type_path(&self.mod_path, path),
+            _ => None,
+        };
+        let objc_entity = entity_path.and_then(|path| {
+            self.index
+                .entity_objc_mapping
+                .get(&path)
+                .map(|entity| entity.clone())
+        });
+
+        let mut child = ObjCMacroVisit {
+            base_dir: self.base_dir,
+            file_rel_path: self.file_rel_path,
+            mod_path: self.mod_path,
+            err: None,
+            objc_entity: objc_entity.as_ref(),
+            index: self.index,
+        };
+        syn::visit::visit_item_impl(&mut child, item_impl);
+        self.err = child.err;
+    }
+
+    fn visit_item_trait(&mut self, item_trait: &'_ syn::ItemTrait) {
+        if self.err.is_some() {
+            return;
+        }
+
+        let entity_path = RustEntityPath {
+            mod_path: self.mod_path.clone(),
+            name: item_trait.ident.to_string(),
+        };
+        let objc_entity = self
+            .index
+            .entity_objc_mapping
+            .get(&entity_path)
+            .map(|entity| entity.clone());
+
+        let mut child = ObjCMacroVisit {
+            base_dir: self.base_dir,
+            file_rel_path: self.file_rel_path,
+            mod_path: self.mod_path,
+            err: None,
+            objc_entity: objc_entity.as_ref(),
+            index: self.index,
+        };
+        syn::visit::visit_item_trait(&mut child, item_trait);
+        self.err = child.err;
+    }
+
+    fn visit_expr_macro(&mut self, expr_mac: &'_ syn::ExprMacro) {
+        if self.err.is_some() {
+            return;
+        }
+
+        match self.do_visit_expr_macro(expr_mac) {
+            Err(err) => self.err = Some(err),
+            Ok(()) => {}
+        }
+    }
+}
+
 struct FileVisit<'a> {
     base_dir: &'a Path,
     file_rel_path: &'a Path,
     mod_path: &'a ModPath,
     err: Option<Error>,
-    mod_for_objc_origin: &'a mut HashMap<ObjCOrigin, ModPath>,
-    interf_traits: &'a mut HashMap<String, ObjCTypeRustLoc>,
-    interf_structs: &'a mut HashMap<String, ObjCTypeRustLoc>,
-    enum_structs: &'a mut HashMap<String, ObjCTypeRustLoc>,
-    protocols: &'a mut HashMap<String, ObjCTypeRustLoc>,
+    index: &'a mut Index,
 }
 
 impl<'a> FileVisit<'a> {
@@ -143,13 +271,14 @@ impl<'a> FileVisit<'a> {
             };
 
             let origin = res_attr.to_objc_origin();
-            if let Some(dup) = self.mod_for_objc_origin.remove(&origin) {
+            if let Some(dup) = self.index.mod_per_objc_origin.remove(&origin) {
                 return Err(self.err_at_loc(
                     attr,
                     format!("{} already stands for the same Objective-C source", dup),
                 ));
             }
-            self.mod_for_objc_origin
+            self.index
+                .mod_per_objc_origin
                 .insert(origin, new_mod_path.clone());
         }
 
@@ -159,11 +288,7 @@ impl<'a> FileVisit<'a> {
                 file_rel_path: self.file_rel_path,
                 mod_path: &new_mod_path,
                 err: None,
-                mod_for_objc_origin: self.mod_for_objc_origin,
-                interf_traits: self.interf_traits,
-                interf_structs: self.interf_structs,
-                enum_structs: self.enum_structs,
-                protocols: self.protocols,
+                index: self.index,
             };
             syn::visit::visit_item_mod(&mut child, item_mod);
             match child.err {
@@ -191,9 +316,12 @@ impl<'a> FileVisit<'a> {
 
         if let Some(attr) = objc_attrs.first() {
             let rust_name = item_trait.ident.to_string();
-            let loc = ObjCTypeRustLoc {
-                rust_name: rust_name.clone(),
+            let path = RustEntityPath {
                 mod_path: self.mod_path.clone(),
+                name: rust_name.clone(),
+            };
+            let loc = ObjCTypeRustLoc {
+                path: path.clone(),
                 span: item_trait.ident.span(),
                 file_rel_path: self.file_rel_path.to_owned(),
             };
@@ -212,18 +340,16 @@ impl<'a> FileVisit<'a> {
                     }
                 };
 
-                if let Some(existing_loc) = self.interf_traits.get(objc_name) {
-                    if loc.same_module_and_name(existing_loc) {
-                        return Err(self.err_at_loc(
-                            &item_trait.ident,
-                            format!(
-                                "{} is already mapped to {}::{}",
-                                objc_name, existing_loc.mod_path, existing_loc.rust_name
-                            ),
-                        ));
-                    }
+                if let Some(existing_loc) = self.index.interf_traits.get(objc_name) {
+                    return Err(self.err_at_loc(
+                        &item_trait.ident,
+                        format!("{} is already mapped to {}", objc_name, existing_loc.path),
+                    ));
                 } else {
-                    self.interf_traits.insert(objc_name.to_owned(), loc);
+                    self.index.interf_traits.insert(objc_name.to_owned(), loc);
+                    self.index
+                        .entity_objc_mapping
+                        .insert(path, ObjCEntity::Interface(objc_name.to_owned()));
                 }
             } else if attr.path.is_ident("objc_protocol") {
                 let objc_name = match strip_suffix(&rust_name, "Protocol") {
@@ -239,18 +365,16 @@ impl<'a> FileVisit<'a> {
                     }
                 };
 
-                if let Some(existing_loc) = self.protocols.get(objc_name) {
-                    if loc.same_module_and_name(existing_loc) {
-                        return Err(self.err_at_loc(
-                            &item_trait.ident,
-                            format!(
-                                "{} is already mapped to {}::{}",
-                                objc_name, existing_loc.mod_path, existing_loc.rust_name
-                            ),
-                        ));
-                    }
+                if let Some(existing_loc) = self.index.protocols.get(objc_name) {
+                    return Err(self.err_at_loc(
+                        &item_trait.ident,
+                        format!("{} is already mapped to {}", objc_name, existing_loc.path),
+                    ));
                 } else {
-                    self.protocols.insert(objc_name.to_owned(), loc);
+                    self.index.protocols.insert(objc_name.to_owned(), loc);
+                    self.index
+                        .entity_objc_mapping
+                        .insert(path, ObjCEntity::Protocol(objc_name.to_owned()));
                 }
             } else {
                 unreachable!()
@@ -293,40 +417,39 @@ impl<'a> FileVisit<'a> {
                 ));
             }
 
-            let loc = ObjCTypeRustLoc {
-                rust_name: name.clone(),
+            let path = RustEntityPath {
                 mod_path: self.mod_path.clone(),
+                name: name.clone(),
+            };
+            let loc = ObjCTypeRustLoc {
+                path: path.clone(),
                 span: item_struct.ident.span(),
                 file_rel_path: self.file_rel_path.to_owned(),
             };
 
             if attr.path.is_ident("objc_interface") {
-                if let Some(existing_loc) = self.interf_structs.get(&name) {
-                    if loc.same_module_and_name(existing_loc) {
-                        return Err(self.err_at_loc(
-                            &item_struct.ident,
-                            format!(
-                                "{} is already mapped to {}::{}",
-                                name, existing_loc.mod_path, existing_loc.rust_name
-                            ),
-                        ));
-                    }
+                if let Some(existing_loc) = self.index.interf_structs.get(&name) {
+                    return Err(self.err_at_loc(
+                        &item_struct.ident,
+                        format!("{} is already mapped to {}", name, existing_loc.path),
+                    ));
                 } else {
-                    self.interf_structs.insert(name, loc);
+                    self.index.interf_structs.insert(name.clone(), loc);
+                    self.index
+                        .entity_objc_mapping
+                        .insert(path, ObjCEntity::Interface(name));
                 }
             } else if attr.path.is_ident("objc_enum") {
-                if let Some(existing_loc) = self.enum_structs.get(&name) {
-                    if loc.same_module_and_name(existing_loc) {
-                        return Err(self.err_at_loc(
-                            &item_struct.ident,
-                            format!(
-                                "{} is already mapped to {}::{}",
-                                name, existing_loc.mod_path, existing_loc.rust_name
-                            ),
-                        ));
-                    }
+                if let Some(existing_loc) = self.index.enum_structs.get(&name) {
+                    return Err(self.err_at_loc(
+                        &item_struct.ident,
+                        format!("{} is already mapped to {}", name, existing_loc.path),
+                    ));
                 } else {
-                    self.enum_structs.insert(name, loc);
+                    self.index.enum_structs.insert(name.clone(), loc);
+                    self.index
+                        .entity_objc_mapping
+                        .insert(path, ObjCEntity::Enum(name));
                 }
             } else {
                 unreachable!()
@@ -373,23 +496,79 @@ impl Visit<'_> for FileVisit<'_> {
     }
 }
 
-#[derive(Debug)]
-pub struct RustOverview {
-    pub crate_content: CrateContent,
-    pub mod_for_objc_origin: HashMap<ObjCOrigin, ModPath>,
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct RustEntityPath {
+    pub mod_path: ModPath,
+    pub name: String,
+}
+
+impl RustEntityPath {
+    fn from_type_path(current_mod_path: &ModPath, path: &syn::TypePath) -> Option<Self> {
+        // Only care about simple paths.
+        if path.qself.is_some() {
+            return None;
+        }
+
+        let mut vec: Vec<_> = path
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect();
+
+        let name = vec.pop().expect("the path should not be empty");
+
+        assert!(vec.is_empty(), "relative paths are not supported yet");
+
+        vec.splice(0..0, current_mod_path.0.clone());
+
+        Some(Self {
+            mod_path: ModPath(vec),
+            name,
+        })
+    }
+}
+
+impl std::fmt::Display for RustEntityPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}::{}", self.mod_path, self.name)
+    }
+}
+
+#[derive(Debug, Hash)]
+pub enum RustEntity {
+    Trait(RustEntityPath),
+    Struct(RustEntityPath),
+}
+
+impl RustEntity {
+    fn path(&self) -> &RustEntityPath {
+        match self {
+            Self::Trait(path) => path,
+            Self::Struct(path) => path,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Index {
+    pub mod_per_objc_origin: HashMap<ObjCOrigin, ModPath>,
+    pub entity_objc_mapping: HashMap<RustEntityPath, ObjCEntity>,
     pub interf_traits: HashMap<String, ObjCTypeRustLoc>,
     pub interf_structs: HashMap<String, ObjCTypeRustLoc>,
     pub enum_structs: HashMap<String, ObjCTypeRustLoc>,
     pub protocols: HashMap<String, ObjCTypeRustLoc>,
 }
 
+#[derive(Debug)]
+pub struct RustOverview {
+    pub crate_content: CrateContent,
+    pub index: Index,
+}
+
 impl RustOverview {
     fn parse(crate_content: CrateContent) -> Result<Self> {
-        let mut mod_for_objc_origin = HashMap::new();
-        let mut interf_traits = HashMap::new();
-        let mut interf_structs = HashMap::new();
-        let mut enum_structs = HashMap::new();
-        let mut protocols = HashMap::new();
+        let mut index: Index = Default::default();
 
         for mod_content in &crate_content.content {
             let mut visit = FileVisit {
@@ -397,11 +576,23 @@ impl RustOverview {
                 file_rel_path: &mod_content.file_rel_path,
                 mod_path: &mod_content.mod_path,
                 err: None,
-                mod_for_objc_origin: &mut mod_for_objc_origin,
-                interf_traits: &mut interf_traits,
-                interf_structs: &mut interf_structs,
-                enum_structs: &mut enum_structs,
-                protocols: &mut protocols,
+                index: &mut index,
+            };
+            syn::visit::visit_file(&mut visit, &mod_content.file);
+            if let Some(err) = visit.err {
+                return Err(err);
+            }
+        }
+
+        // We can only visit the obj!() macro uses when we have the list of types in the index.
+        for mod_content in &crate_content.content {
+            let mut visit = ObjCMacroVisit {
+                base_dir: &crate_content.base_dir,
+                file_rel_path: &mod_content.file_rel_path,
+                mod_path: &mod_content.mod_path,
+                err: None,
+                objc_entity: None,
+                index: &mut index,
             };
             syn::visit::visit_file(&mut visit, &mod_content.file);
             if let Some(err) = visit.err {
@@ -411,11 +602,7 @@ impl RustOverview {
 
         Ok(Self {
             crate_content,
-            mod_for_objc_origin,
-            interf_traits,
-            interf_structs,
-            enum_structs,
-            protocols,
+            index,
         })
     }
 }
@@ -429,7 +616,7 @@ fn parse_objc_needed(overview: &RustOverview) -> Result<objc_index::TypeIndex> {
     use std::fmt::Write;
 
     let mut objc_code = String::new();
-    for origin in overview.mod_for_objc_origin.keys() {
+    for origin in overview.index.mod_per_objc_origin.keys() {
         match origin {
             ObjCOrigin::Core => writeln!(&mut objc_code, "#import <objc/NSObject.h>").unwrap(),
             ObjCOrigin::Framework(name) => {
@@ -462,7 +649,7 @@ fn check_origin(
         Some(objc_ast::Origin::Framework(name)) => ObjCOrigin::Framework(name.clone()),
         Some(objc_ast::Origin::Library(_)) => unimplemented!(),
     };
-    let mod_path_expected = match overview.rust.mod_for_objc_origin.get(&origin) {
+    let mod_path_expected = match overview.rust.index.mod_per_objc_origin.get(&origin) {
         Some(mod_path) => mod_path,
         None => {
             let origin_text = match origin {
@@ -478,7 +665,7 @@ fn check_origin(
             ));
         }
     };
-    if mod_path_expected != &loc.mod_path {
+    if mod_path_expected != &loc.path.mod_path {
         let origin_text = match origin {
             ObjCOrigin::Core => "by the Objective-C runtime".to_owned(),
             ObjCOrigin::Framework(name) => format!("in the Objective-C framework {}", name),
@@ -486,8 +673,8 @@ fn check_origin(
         return Err(loc.err_in_dir(
             base_dir,
             format!(
-                "expected {}::{} to be declared in module {}, as the {} {} is declared {}",
-                loc.mod_path, loc.rust_name, mod_path_expected, kind, objc_name, origin_text
+                "expected {} to be declared in module {}, as the {} {} is declared {}",
+                loc.path, mod_path_expected, kind, objc_name, origin_text
             ),
         ));
     }
@@ -498,7 +685,7 @@ fn check_origin(
 fn check_validity(overview: &Overview) -> Result<()> {
     let base_dir = &overview.rust.crate_content.base_dir;
 
-    for (objc_name, loc) in &overview.rust.protocols {
+    for (objc_name, loc) in &overview.rust.index.protocols {
         let def = match overview.objc_index.protocols.get(objc_name) {
             Some(def) => def,
             None => {
@@ -511,7 +698,7 @@ fn check_validity(overview: &Overview) -> Result<()> {
         check_origin(overview, "@protocol", &objc_name, &loc, &def.origin)?;
     }
 
-    for (objc_name, loc) in &overview.rust.interf_traits {
+    for (objc_name, loc) in &overview.rust.index.interf_traits {
         let def = match overview.objc_index.interfaces.get(objc_name) {
             Some(def) => def,
             None => {
@@ -524,7 +711,7 @@ fn check_validity(overview: &Overview) -> Result<()> {
         check_origin(overview, "@interface", &objc_name, &loc, &def.origin)?;
     }
 
-    for (objc_name, loc) in &overview.rust.interf_structs {
+    for (objc_name, loc) in &overview.rust.index.interf_structs {
         let def = match overview.objc_index.interfaces.get(objc_name) {
             Some(def) => def,
             None => {
@@ -536,7 +723,7 @@ fn check_validity(overview: &Overview) -> Result<()> {
         };
         check_origin(overview, "@interface", &objc_name, &loc, &def.origin)?;
 
-        if overview.rust.interf_traits.get(objc_name).is_none() {
+        if overview.rust.index.interf_traits.get(objc_name).is_none() {
             return Err(loc.err_in_dir(
                 base_dir,
                 format!(
@@ -547,7 +734,7 @@ fn check_validity(overview: &Overview) -> Result<()> {
         }
     }
 
-    for (objc_name, loc) in &overview.rust.enum_structs {
+    for (objc_name, loc) in &overview.rust.index.enum_structs {
         use objc_ast::{TagId, TagKind, TagRef, Type};
 
         let objc_origin = match overview.objc_index.resolve_typedef(objc_name) {

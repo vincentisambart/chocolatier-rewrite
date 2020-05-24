@@ -30,6 +30,9 @@ pub trait NSStringInterface {
 }
 
 #[objc_interface]
+pub struct NSString;
+
+#[objc_interface]
 impl NSString {
     pub fn new_with_str(text: &str) -> Self {
         let bytes = text.as_ptr();
