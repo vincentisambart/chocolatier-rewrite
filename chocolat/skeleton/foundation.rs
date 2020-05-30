@@ -92,11 +92,11 @@ impl<T: ObjCPtr> NSArray<T> {
 #[objc_interface]
 pub trait NSMutableArrayInterface<T: ObjCPtr> {
     fn add_object<U: Into<T> + ObjCPtr>(&self, object: &U) {
-        unsafe { objc!([Self addObject:U]) }
+        unsafe { objc!([self addObject:U]) }
     }
 
     fn insert_object_at<U: Into<T> + ObjCPtr>(&self, object: &U, index: usize) {
-        unsafe { objc!([Self insertObject:object atIndex:index]) }
+        unsafe { objc!([self insertObject:object atIndex:index]) }
     }
 }
 
