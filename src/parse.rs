@@ -16,7 +16,6 @@ pub enum ObjCMethodParams {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ObjCReceiver {
     SelfValue(syn::Token![self]),
-    SelfType(syn::Token![Self]),
     Class(syn::Ident),
     MethodCall(Box<ObjCMethodCall>),
 }
@@ -26,8 +25,6 @@ impl Parse for ObjCReceiver {
         let lookahead = input.lookahead1();
         if lookahead.peek(syn::Token![self]) {
             Ok(Self::SelfValue(input.parse()?))
-        } else if lookahead.peek(syn::Token![Self]) {
-            Ok(Self::SelfType(input.parse()?))
         } else if lookahead.peek(syn::Ident) {
             Ok(Self::Class(input.parse()?))
         } else if lookahead.peek(syn::token::Bracket) {
@@ -130,7 +127,6 @@ pub struct ObjCPropertySet {
 // Valid uses of the objc!() macro:
 // - objc!([self myInstanceMethod:val1 param2:val2])
 // - objc!([self innerMethod:val1] myMethod:val2 param2:val3])
-// - objc!([Self myClassMethod:val1 param:val2])
 // - objc!(myFunc(val1, val2))
 // - objc!(self.myInstanceProperty)
 // - objc!(Self.myClassProperty)
@@ -160,7 +156,6 @@ impl Parse for ObjCExpr {
             let err_msg = "method or property name expected";
             return match receiver {
                 ObjCReceiver::SelfValue(token) => Err(syn::Error::new_spanned(token, err_msg)),
-                ObjCReceiver::SelfType(token) => Err(syn::Error::new_spanned(token, err_msg)),
                 ObjCReceiver::Class(token) => Err(syn::Error::new_spanned(token, err_msg)),
                 ObjCReceiver::MethodCall(call) => Ok(Self::MethodCall(*call)),
             };
@@ -207,7 +202,7 @@ mod tests {
         ));
 
         let nested_call_multiparams: ObjCExpr =
-            syn::parse_quote!([[Self alloc] myMethod:1+2 otherParam:3+4]);
+            syn::parse_quote!([[self alloc] myMethod:1+2 otherParam:3+4]);
         match &nested_call_multiparams {
             ObjCExpr::MethodCall(ObjCMethodCall {
                 bracket_token: _,
@@ -216,7 +211,7 @@ mod tests {
             }) => {
                 assert!(matches!(receiver.as_ref(), ObjCMethodCall {
                     bracket_token: _,
-                    receiver: ObjCReceiver::SelfType(_),
+                    receiver: ObjCReceiver::SelfValue(_),
                     params: ObjCMethodParams::Without(method_name),
                 } if method_name == "alloc"));
                 match params.as_slice() {

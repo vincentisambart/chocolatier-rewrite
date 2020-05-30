@@ -78,7 +78,7 @@ pub trait NSObjectProtocol {
 #[objc_interface]
 pub trait NSObjectInterface {
     fn new() -> Self {
-        objc!([Self new])
+        objc!([self new])
     }
 }
 

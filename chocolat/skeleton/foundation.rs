@@ -40,7 +40,7 @@ impl NSString {
         let encoding = NSStringEncoding::UTF8;
         unsafe {
             Self::from_raw_unchecked(
-                objc!([[Self alloc] initWithBytes:bytes length:len encoding:encoding]),
+                objc!([[self alloc] initWithBytes:bytes length:len encoding:encoding]),
             )
         }
     }
@@ -85,7 +85,7 @@ pub struct NSArray<T: ObjCPtr>;
 #[objc_interface]
 impl<T: ObjCPtr> NSArray<T> {
     pub fn new() -> Self {
-        unsafe { objc!([Self new]) }
+        unsafe { objc!([self new]) }
     }
 }
 
@@ -106,6 +106,6 @@ pub struct NSMutableArray<T: ObjCPtr>;
 #[objc_interface]
 impl<T: ObjCPtr> NSMutableArray<T> {
     pub fn new() -> Self {
-        unsafe { objc!([Self new]) }
+        unsafe { objc!([self new]) }
     }
 }
