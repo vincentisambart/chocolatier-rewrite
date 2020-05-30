@@ -42,10 +42,6 @@ pub struct ObjCTypeRustLoc {
 }
 
 impl ObjCTypeRustLoc {
-    fn same_path(&self, other: &Self) -> bool {
-        self.path == other.path
-    }
-
     fn err_in_dir(&self, base_dir: &Path, message: String) -> Error {
         Error::at_loc(base_dir.join(&self.file_rel_path), self.span, message)
     }
@@ -130,12 +126,10 @@ impl Visit<'_> for ObjCMacroVisit<'_> {
 
         let new_mod_path = self.mod_path.child(item_mod.ident.to_string());
         let mut child = ObjCMacroVisit {
-            base_dir: self.base_dir,
-            file_rel_path: self.file_rel_path,
             mod_path: &new_mod_path,
             err: None,
-            objc_entity: self.objc_entity,
             index: self.index,
+            ..*self
         };
         syn::visit::visit_item_mod(&mut child, item_mod);
         self.err = child.err;
@@ -150,20 +144,14 @@ impl Visit<'_> for ObjCMacroVisit<'_> {
             syn::Type::Path(path) => RustEntityPath::from_type_path(&self.mod_path, path),
             _ => None,
         };
-        let objc_entity = entity_path.and_then(|path| {
-            self.index
-                .entity_objc_mapping
-                .get(&path)
-                .map(|entity| entity.clone())
-        });
+        let objc_entity =
+            entity_path.and_then(|path| self.index.entity_objc_mapping.get(&path).cloned());
 
         let mut child = ObjCMacroVisit {
-            base_dir: self.base_dir,
-            file_rel_path: self.file_rel_path,
-            mod_path: self.mod_path,
             err: None,
             objc_entity: objc_entity.as_ref(),
             index: self.index,
+            ..*self
         };
         syn::visit::visit_item_impl(&mut child, item_impl);
         self.err = child.err;
@@ -178,19 +166,13 @@ impl Visit<'_> for ObjCMacroVisit<'_> {
             mod_path: self.mod_path.clone(),
             name: item_trait.ident.to_string(),
         };
-        let objc_entity = self
-            .index
-            .entity_objc_mapping
-            .get(&entity_path)
-            .map(|entity| entity.clone());
+        let objc_entity = self.index.entity_objc_mapping.get(&entity_path).cloned();
 
         let mut child = ObjCMacroVisit {
-            base_dir: self.base_dir,
-            file_rel_path: self.file_rel_path,
-            mod_path: self.mod_path,
             err: None,
             objc_entity: objc_entity.as_ref(),
             index: self.index,
+            ..*self
         };
         syn::visit::visit_item_trait(&mut child, item_trait);
         self.err = child.err;
@@ -284,11 +266,10 @@ impl<'a> FileVisit<'a> {
 
         if item_mod.content.is_some() {
             let mut child = FileVisit {
-                base_dir: self.base_dir,
-                file_rel_path: self.file_rel_path,
                 mod_path: &new_mod_path,
                 err: None,
                 index: self.index,
+                ..*self
             };
             syn::visit::visit_item_mod(&mut child, item_mod);
             match child.err {
@@ -532,21 +513,6 @@ impl RustEntityPath {
 impl std::fmt::Display for RustEntityPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}::{}", self.mod_path, self.name)
-    }
-}
-
-#[derive(Debug, Hash)]
-pub enum RustEntity {
-    Trait(RustEntityPath),
-    Struct(RustEntityPath),
-}
-
-impl RustEntity {
-    fn path(&self) -> &RustEntityPath {
-        match self {
-            Self::Trait(path) => path,
-            Self::Struct(path) => path,
-        }
     }
 }
 
