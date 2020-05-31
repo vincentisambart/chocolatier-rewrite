@@ -63,133 +63,6 @@ pub enum ObjCEntity {
     Enum(String),
 }
 
-struct ObjCMacroVisit<'a> {
-    base_dir: &'a Path,
-    file_rel_path: &'a Path,
-    mod_path: &'a ModPath,
-    err: Option<Error>,
-    objc_entity: Option<&'a ObjCEntity>,
-    index: &'a mut Index,
-}
-
-impl ObjCMacroVisit<'_> {
-    fn full_file_path(&self) -> PathBuf {
-        self.base_dir.join(self.file_rel_path)
-    }
-
-    fn syn_err(&self, err: syn::Error) -> Error {
-        Error::syn_err_rel(err, &self.base_dir, self.file_rel_path)
-    }
-
-    fn err_at_loc<Spanned, IntoString>(&self, spanned: Spanned, message: IntoString) -> Error
-    where
-        IntoString: Into<String>,
-        Spanned: syn::spanned::Spanned,
-    {
-        Error::at_loc(self.full_file_path(), spanned, message)
-    }
-
-    fn do_visit_expr_macro(&mut self, expr_mac: &'_ syn::ExprMacro) -> Result<()> {
-        if !expr_mac.mac.path.is_ident("objc") {
-            syn::visit::visit_expr_macro(self, expr_mac);
-            return Ok(());
-        }
-
-        let entity = match &self.objc_entity {
-            Some(user) => user,
-            None => {
-                return Err(self.err_at_loc(
-                    expr_mac,
-                    "objc!() can only be used in #[objc_*] marked impl",
-                ))
-            }
-        };
-
-        // Note that we do not support nesting of objc!(),
-        // as it increases complexity and is probably not useful.
-        // You can do some limited nesting of ObjC calls though: objc!([[Self alloc] init])
-
-        let _objc_expr: crate::parse::ObjCExpr =
-            expr_mac.mac.parse_body().map_err(|err| self.syn_err(err))?;
-
-        // TODO
-
-        Ok(())
-    }
-}
-
-impl Visit<'_> for ObjCMacroVisit<'_> {
-    fn visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) {
-        if self.err.is_some() {
-            return;
-        }
-
-        let new_mod_path = self.mod_path.child(item_mod.ident.to_string());
-        let mut child = ObjCMacroVisit {
-            mod_path: &new_mod_path,
-            err: None,
-            index: self.index,
-            ..*self
-        };
-        syn::visit::visit_item_mod(&mut child, item_mod);
-        self.err = child.err;
-    }
-
-    fn visit_item_impl(&mut self, item_impl: &'_ syn::ItemImpl) {
-        if self.err.is_some() {
-            return;
-        }
-
-        let entity_path = match &*item_impl.self_ty {
-            syn::Type::Path(path) => RustEntityPath::from_type_path(&self.mod_path, path),
-            _ => None,
-        };
-        let objc_entity =
-            entity_path.and_then(|path| self.index.entity_objc_mapping.get(&path).cloned());
-
-        let mut child = ObjCMacroVisit {
-            err: None,
-            objc_entity: objc_entity.as_ref(),
-            index: self.index,
-            ..*self
-        };
-        syn::visit::visit_item_impl(&mut child, item_impl);
-        self.err = child.err;
-    }
-
-    fn visit_item_trait(&mut self, item_trait: &'_ syn::ItemTrait) {
-        if self.err.is_some() {
-            return;
-        }
-
-        let entity_path = RustEntityPath {
-            mod_path: self.mod_path.clone(),
-            name: item_trait.ident.to_string(),
-        };
-        let objc_entity = self.index.entity_objc_mapping.get(&entity_path).cloned();
-
-        let mut child = ObjCMacroVisit {
-            err: None,
-            objc_entity: objc_entity.as_ref(),
-            index: self.index,
-            ..*self
-        };
-        syn::visit::visit_item_trait(&mut child, item_trait);
-        self.err = child.err;
-    }
-
-    fn visit_expr_macro(&mut self, expr_mac: &'_ syn::ExprMacro) {
-        if self.err.is_some() {
-            return;
-        }
-
-        match self.do_visit_expr_macro(expr_mac) {
-            Err(err) => self.err = Some(err),
-            Ok(()) => {}
-        }
-    }
-}
-
 struct FileVisit<'a> {
     base_dir: &'a Path,
     file_rel_path: &'a Path,
@@ -484,7 +357,7 @@ pub struct RustEntityPath {
 }
 
 impl RustEntityPath {
-    fn from_type_path(current_mod_path: &ModPath, path: &syn::TypePath) -> Option<Self> {
+    pub fn from_type_path(current_mod_path: &ModPath, path: &syn::TypePath) -> Option<Self> {
         // Only care about simple paths.
         if path.qself.is_some() {
             return None;
@@ -542,22 +415,6 @@ impl RustOverview {
                 file_rel_path: &mod_content.file_rel_path,
                 mod_path: &mod_content.mod_path,
                 err: None,
-                index: &mut index,
-            };
-            syn::visit::visit_file(&mut visit, &mod_content.file);
-            if let Some(err) = visit.err {
-                return Err(err);
-            }
-        }
-
-        // We can only visit the obj!() macro uses when we have the list of types in the index.
-        for mod_content in &crate_content.content {
-            let mut visit = ObjCMacroVisit {
-                base_dir: &crate_content.base_dir,
-                file_rel_path: &mod_content.file_rel_path,
-                mod_path: &mod_content.mod_path,
-                err: None,
-                objc_entity: None,
                 index: &mut index,
             };
             syn::visit::visit_file(&mut visit, &mod_content.file);

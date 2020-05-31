@@ -1,7 +1,7 @@
 use crate::common::{Error, ModPath, Result};
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
-
+#[derive(Clone)]
 pub struct ModContent {
     pub mod_path: ModPath,
     pub file_rel_path: PathBuf,
@@ -35,7 +35,7 @@ struct FileVisit<'a> {
     crate_content: &'a mut CrateContent,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CrateContent {
     /// Keep content in a Vec to keep the read order.
     pub content: Vec<ModContent>,

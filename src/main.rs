@@ -2,9 +2,11 @@
 #![allow(clippy::assertions_on_constants)]
 
 mod common;
+mod gen;
 mod parse;
 mod read;
 mod skel;
+mod write;
 
 use common::{Error, Result};
 use std::path::Path;
@@ -19,13 +21,13 @@ fn run() -> Result<()> {
     let src_path = Path::new(&args[1]);
     let dst_path = Path::new(&args[2]);
 
-    if !dst_path.exists() {
-        std::fs::create_dir_all(dst_path).expect("could not create destination directory");
-    } else if !dst_path.is_dir() {
+    if dst_path.exists() && !dst_path.is_dir() {
         return Err(Error::expected_dir(dst_path));
     }
 
-    skel::read_skeleton(&src_path)?;
+    let skeleton = skel::read_skeleton(&src_path)?;
+    let generated = gen::generate(&skeleton)?;
+    write::write_crate(dst_path, &generated)?;
 
     Ok(())
 }
