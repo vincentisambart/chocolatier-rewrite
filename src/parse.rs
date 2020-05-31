@@ -1,4 +1,5 @@
 use syn::parse::{Parse, ParseStream};
+use syn::spanned::Spanned;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjCMethodParam {
@@ -14,19 +15,29 @@ pub enum ObjCMethodParams {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum ObjCReceiver {
+pub enum ObjCMacroReceiver {
     SelfValue(syn::Token![self]),
     Class(syn::Ident),
     MethodCall(Box<ObjCMethodCall>),
 }
 
-impl Parse for ObjCReceiver {
+impl Parse for ObjCMacroReceiver {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let lookahead = input.lookahead1();
         if lookahead.peek(syn::Token![self]) {
             Ok(Self::SelfValue(input.parse()?))
         } else if lookahead.peek(syn::Ident) {
-            Ok(Self::Class(input.parse()?))
+            let ident: syn::Ident = input.parse()?;
+            match ident.to_string().chars().next() {
+                Some(first) if first.is_ascii_uppercase() => {}
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        ident,
+                        "receiver expected to be `self` or a class name",
+                    ))
+                }
+            }
+            Ok(Self::Class(ident))
         } else if lookahead.peek(syn::token::Bracket) {
             Ok(Self::MethodCall(input.parse()?))
         } else {
@@ -38,7 +49,7 @@ impl Parse for ObjCReceiver {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjCMethodCall {
     pub bracket_token: syn::token::Bracket,
-    pub receiver: ObjCReceiver,
+    pub receiver: ObjCMacroReceiver,
     pub params: ObjCMethodParams,
 }
 
@@ -60,11 +71,22 @@ impl ObjCMethodCall {
     }
 }
 
+impl Spanned for ObjCMethodCall {
+    fn span(&self) -> proc_macro2::Span {
+        // Could probably do better but we only display the starting position anyway so that will do for the time being.
+        match &self.receiver {
+            ObjCMacroReceiver::SelfValue(token) => token.span(),
+            ObjCMacroReceiver::Class(token) => token.span(),
+            ObjCMacroReceiver::MethodCall(call) => call.span(),
+        }
+    }
+}
+
 impl Parse for ObjCMethodCall {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let content;
         let bracket_token = syn::bracketed!(content in input);
-        let receiver: ObjCReceiver = content.parse()?;
+        let receiver: ObjCMacroReceiver = content.parse()?;
         let method_name_start: syn::Ident = content.parse()?;
         let params = if content.peek(syn::Token![:]) {
             let mut v: Vec<ObjCMethodParam> = Vec::new();
@@ -110,14 +132,14 @@ impl Parse for ObjCMethodCall {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjCPropertyGet {
-    pub receiver: ObjCReceiver,
+    pub receiver: ObjCMacroReceiver,
     pub dot_token: syn::Token![.],
     pub property_name: syn::Ident,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjCPropertySet {
-    pub receiver: ObjCReceiver,
+    pub receiver: ObjCMacroReceiver,
     pub dot_token: syn::Token![.],
     pub property_name: syn::Ident,
     pub eq_token: syn::Token![=],
@@ -139,7 +161,7 @@ pub enum ObjCExpr {
 }
 
 impl ObjCExpr {
-    pub fn receiver(&self) -> &ObjCReceiver {
+    pub fn receiver(&self) -> &ObjCMacroReceiver {
         match self {
             Self::MethodCall(call) => &call.receiver,
             Self::PropertyGet(get) => &get.receiver,
@@ -150,14 +172,14 @@ impl ObjCExpr {
 
 impl Parse for ObjCExpr {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let receiver: ObjCReceiver = input.parse()?;
+        let receiver: ObjCMacroReceiver = input.parse()?;
 
         if !input.peek(syn::Token![.]) {
             let err_msg = "method or property name expected";
             return match receiver {
-                ObjCReceiver::SelfValue(token) => Err(syn::Error::new_spanned(token, err_msg)),
-                ObjCReceiver::Class(token) => Err(syn::Error::new_spanned(token, err_msg)),
-                ObjCReceiver::MethodCall(call) => Ok(Self::MethodCall(*call)),
+                ObjCMacroReceiver::SelfValue(token) => Err(syn::Error::new_spanned(token, err_msg)),
+                ObjCMacroReceiver::Class(token) => Err(syn::Error::new_spanned(token, err_msg)),
+                ObjCMacroReceiver::MethodCall(call) => Ok(Self::MethodCall(*call)),
             };
         }
 
@@ -196,7 +218,7 @@ mod tests {
             &no_param_call,
             ObjCExpr::MethodCall(ObjCMethodCall {
                 bracket_token: _,
-                receiver: ObjCReceiver::SelfValue(_),
+                receiver: ObjCMacroReceiver::SelfValue(_),
                 params: ObjCMethodParams::Without(method_name),
             }) if method_name == "myMethod"
         ));
@@ -206,12 +228,12 @@ mod tests {
         match &nested_call_multiparams {
             ObjCExpr::MethodCall(ObjCMethodCall {
                 bracket_token: _,
-                receiver: ObjCReceiver::MethodCall(receiver),
+                receiver: ObjCMacroReceiver::MethodCall(receiver),
                 params: ObjCMethodParams::With(params),
             }) => {
                 assert!(matches!(receiver.as_ref(), ObjCMethodCall {
                     bracket_token: _,
-                    receiver: ObjCReceiver::SelfValue(_),
+                    receiver: ObjCMacroReceiver::SelfValue(_),
                     params: ObjCMethodParams::Without(method_name),
                 } if method_name == "alloc"));
                 match params.as_slice() {
