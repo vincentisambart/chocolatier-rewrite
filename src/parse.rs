@@ -74,11 +74,7 @@ impl ObjCMethodCall {
 impl Spanned for ObjCMethodCall {
     fn span(&self) -> proc_macro2::Span {
         // Could probably do better but we only display the starting position anyway so that will do for the time being.
-        match &self.receiver {
-            ObjCMacroReceiver::SelfValue(token) => token.span(),
-            ObjCMacroReceiver::Class(token) => token.span(),
-            ObjCMacroReceiver::MethodCall(call) => call.span(),
-        }
+        self.bracket_token.span
     }
 }
 

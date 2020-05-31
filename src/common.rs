@@ -11,7 +11,14 @@ impl std::fmt::Display for ErrorLoc {
         match self.span {
             Some(span) => {
                 let start = span.start();
-                write!(f, "{}:{}:{}", self.path.display(), start.line, start.column,)
+                write!(
+                    f,
+                    "{}:{}:{}",
+                    self.path.display(),
+                    start.line,
+                    // column is 0-indexed but we want to display it 1-indexed
+                    start.column + 1,
+                )
             }
             None => write!(f, "{}", self.path.display()),
         }
