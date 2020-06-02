@@ -43,6 +43,12 @@ struct ResolvedObjCMethod {
     method: objc_ast::ObjCMethod,
 }
 
+#[derive(Debug)]
+struct ResolvedObjCProperty {
+    receiver: ObjCMethodReceiver,
+    property: objc_ast::Property,
+}
+
 struct ObjCResolver<'a> {
     objc_index: &'a objc_index::TypeIndex,
     base_dir: &'a Path,
@@ -66,90 +72,160 @@ impl<'a> ObjCResolver<'a> {
         self.base_dir.join(self.file_rel_path)
     }
 
-    /// Trying to find the method it the oldest ancestor of receiver.
+    /// Trying to find the method in the oldest ancestor of receiver.
     fn resolve_method(
         &self,
         receiver: &ObjCMethodReceiverRef<'_>,
         selector: &str,
         method_kind: ObjCMethodKind,
-        span: proc_macro2::Span,
-    ) -> Result<Option<ResolvedObjCMethod>> {
+    ) -> Option<ResolvedObjCMethod> {
         match *receiver {
             ObjCMethodReceiverRef::Interface(interf) => {
+                // Here we should not be given an non existing type, so just panic if we cannot find it.
                 let def = match self.objc_index.interfaces.get(interf) {
                     Some(def) => def,
-                    None => {
-                        return Err(Error::at_loc(
-                            self.full_file_path(),
-                            span,
-                            format!("Could not find interface {}", interf),
-                        ))
-                    }
+                    None => panic!("Could not find interface {}", interf),
                 };
-                if let Some(ref superclass) = def.superclass {
-                    if let Some(resolved) = self.resolve_method(
+                if let Some(resolved) = def.superclass.as_ref().and_then(|superclass| {
+                    self.resolve_method(
                         &ObjCMethodReceiverRef::Interface(superclass),
                         selector,
                         method_kind,
-                        span,
-                    )? {
-                        return Ok(Some(resolved));
-                    }
+                    )
+                }) {
+                    return Some(resolved);
                 }
-                for protoc in &def.adopted_protocols {
-                    if let Some(resolved) = self.resolve_method(
+                if let Some(resolved) = def.adopted_protocols.iter().find_map(|protoc| {
+                    self.resolve_method(
                         &ObjCMethodReceiverRef::Protocol(protoc),
                         selector,
                         method_kind,
-                        span,
-                    )? {
-                        return Ok(Some(resolved));
-                    }
+                    )
+                }) {
+                    return Some(resolved);
                 }
 
-                for method in &def.methods {
-                    if method.kind == method_kind && method.name == selector {
-                        return Ok(Some(ResolvedObjCMethod {
-                            receiver: receiver.to_owned(),
-                            method: method.clone(),
-                        }));
-                    }
-                }
+                def.methods
+                    .iter()
+                    .filter(|method| method.kind == method_kind && method.name == selector)
+                    .next()
+                    .map(|method| ResolvedObjCMethod {
+                        receiver: receiver.to_owned(),
+                        method: method.clone(),
+                    })
             }
             ObjCMethodReceiverRef::Protocol(protoc) => {
+                // Here we should not be given an non existing type, so just panic if we cannot find it.
                 let def = match self.objc_index.protocols.get(protoc) {
                     Some(def) => def,
-                    None => {
-                        return Err(Error::at_loc(
-                            self.full_file_path(),
-                            span,
-                            format!("Could not find protocol {}", protoc),
-                        ))
-                    }
+                    None => panic!("Could not find protocol {}", protoc),
                 };
 
-                for protoc in &def.inherited_protocols {
-                    if let Some(resolved) = self.resolve_method(
+                if let Some(resolved) = def.inherited_protocols.iter().find_map(|protoc| {
+                    self.resolve_method(
                         &ObjCMethodReceiverRef::Protocol(protoc),
                         selector,
                         method_kind,
-                        span,
-                    )? {
-                        return Ok(Some(resolved));
-                    }
+                    )
+                }) {
+                    return Some(resolved);
                 }
 
-                for method in &def.methods {
-                    if method.method.kind == method_kind && method.method.name == selector {
-                        return Ok(Some(ResolvedObjCMethod {
-                            receiver: receiver.to_owned(),
-                            method: method.method.clone(),
-                        }));
-                    }
-                }
+                def.methods
+                    .iter()
+                    .filter(|method| {
+                        method.method.kind == method_kind && method.method.name == selector
+                    })
+                    .next()
+                    .map(|method| ResolvedObjCMethod {
+                        receiver: receiver.to_owned(),
+                        method: method.method.clone(),
+                    })
             }
         }
-        Ok(None)
+    }
+
+    /// Trying to find the property in the oldest ancestor of receiver.
+    fn resolve_property(
+        &self,
+        receiver: &ObjCMethodReceiverRef<'_>,
+        name: &str,
+        is_class: bool,
+        must_be_writable: bool,
+    ) -> Option<ResolvedObjCProperty> {
+        match *receiver {
+            ObjCMethodReceiverRef::Interface(interf) => {
+                // Here we should not be given an non existing type, so just panic if we cannot find it.
+                let def = match self.objc_index.interfaces.get(interf) {
+                    Some(def) => def,
+                    None => panic!("Could not find interface {}", interf),
+                };
+                if let Some(resolved) = def.superclass.as_ref().and_then(|superclass| {
+                    self.resolve_property(
+                        &ObjCMethodReceiverRef::Interface(superclass),
+                        name,
+                        is_class,
+                        must_be_writable,
+                    )
+                }) {
+                    return Some(resolved);
+                }
+                if let Some(resolved) = def.adopted_protocols.iter().find_map(|protoc| {
+                    self.resolve_property(
+                        &ObjCMethodReceiverRef::Protocol(protoc),
+                        name,
+                        is_class,
+                        must_be_writable,
+                    )
+                }) {
+                    return Some(resolved);
+                }
+
+                def.properties
+                    .iter()
+                    .filter(|prop| {
+                        prop.is_class == is_class
+                            && (!must_be_writable || prop.is_writable)
+                            && prop.name == name
+                    })
+                    .next()
+                    .map(|prop| ResolvedObjCProperty {
+                        receiver: receiver.to_owned(),
+                        property: prop.clone(),
+                    })
+            }
+            ObjCMethodReceiverRef::Protocol(protoc) => {
+                // Here we should not be given an non existing type, so just panic if we cannot find it.
+                let def = match self.objc_index.protocols.get(protoc) {
+                    Some(def) => def,
+                    None => panic!("Could not find protocol {}", protoc),
+                };
+
+                if let Some(resolved) = def.inherited_protocols.iter().find_map(|protoc| {
+                    self.resolve_property(
+                        &ObjCMethodReceiverRef::Protocol(protoc),
+                        name,
+                        is_class,
+                        must_be_writable,
+                    )
+                }) {
+                    return Some(resolved);
+                }
+
+                def.properties
+                    .iter()
+                    .filter(|prop| {
+                        prop.property.is_class == is_class
+                            && (!must_be_writable || prop.property.is_writable)
+                            && prop.property.name == name
+                    })
+                    .next()
+                    .map(|prop| ResolvedObjCProperty {
+                        receiver: receiver.to_owned(),
+                        property: prop.property.clone(),
+                    })
+            }
+        }
     }
 
     fn resolve(
@@ -178,38 +254,122 @@ impl<'a> ObjCResolver<'a> {
             ObjCMacroReceiver::Class(_) => ObjCMethodKind::Class,
             ObjCMacroReceiver::MethodCall(_) => todo!(),
         };
+        let receiver = match objc_expr.receiver() {
+            ObjCMacroReceiver::SelfValue(self_token) => match objc_entity {
+                Some(entity) => match entity {
+                    ObjCEntity::Protocol(protoc) => ObjCMethodReceiver::Protocol(protoc.to_string()),
+                    ObjCEntity::Interface(interf) => ObjCMethodReceiver::Interface(interf.to_string()),
+                    ObjCEntity::Enum(_) => {
+                        return Err(Error::at_loc(
+                            self.full_file_path(),
+                            self_token,
+                            "methods cannot be called on enums",
+                         ))
+                    }
+                },
+                None => {
+                    return Err(Error::at_loc(
+                        self.full_file_path(),
+                        self_token,
+                        "`self` can only be used in an impl or trait linked to an ObjC interface or protocol",
+                    ))
+                }
+            },
+            ObjCMacroReceiver::Class(name) => ObjCMethodReceiver::Interface(name.to_string()),
+            ObjCMacroReceiver::MethodCall(_) => todo!(),
+        };
         match objc_expr {
             ObjCExpr::MethodCall(call) => {
                 let sel = call.selector();
-                let receiver = match objc_expr.receiver() {
-                    ObjCMacroReceiver::SelfValue(self_token) => match objc_entity {
-                        Some(entity) => match entity {
-                            ObjCEntity::Protocol(protoc) => ObjCMethodReceiver::Protocol(protoc.to_string()),
-                            ObjCEntity::Interface(interf) => ObjCMethodReceiver::Interface(interf.to_string()),
-                            ObjCEntity::Enum(_) => {
-                                return Err(Error::at_loc(
-                                    self.full_file_path(),
-                                    self_token,
-                                    "methods cannot be called on enums",
-                                 ))
-                            }
-                        },
-                        None => {
+                let _resolved = match self.resolve_method(&receiver.to_ref(), &sel, method_kind) {
+                    Some(resolved) => resolved,
+                    None => {
+                        let kind = match method_kind {
+                            ObjCMethodKind::Class => "+",
+                            ObjCMethodKind::Instance => "-",
+                        };
+                        let receiver_name = match receiver {
+                            ObjCMethodReceiver::Interface(name) => name,
+                            ObjCMethodReceiver::Protocol(name) => format!("id<{}>", name),
+                        };
+                        return Err(Error::at_loc(
+                            self.full_file_path(),
+                            call.span(),
+                            format!(
+                                "could not find method {kind}[{receiver} {sel}]",
+                                kind = kind,
+                                receiver = receiver_name,
+                                sel = sel,
+                            ),
+                        ));
+                    }
+                };
+            }
+            ObjCExpr::PropertyGet(_) | ObjCExpr::PropertySet(_) => {
+                let (property_name, must_be_writable) = match objc_expr {
+                    ObjCExpr::MethodCall(_) => unreachable!(),
+                    ObjCExpr::PropertyGet(get) => (&get.property_name, false),
+                    ObjCExpr::PropertySet(set) => (&set.property_name, true),
+                };
+                let name = property_name.to_string();
+                let is_class_property = match method_kind {
+                    ObjCMethodKind::Class => true,
+                    ObjCMethodKind::Instance => false,
+                };
+                let span = property_name.span();
+
+                let _resolved = match self.resolve_property(
+                    &receiver.to_ref(),
+                    &name,
+                    is_class_property,
+                    must_be_writable,
+                ) {
+                    Some(resolved) => resolved,
+                    None => {
+                        let kind = match method_kind {
+                            ObjCMethodKind::Class => "class",
+                            ObjCMethodKind::Instance => "instance",
+                        };
+                        let receiver_name = match &receiver {
+                            ObjCMethodReceiver::Interface(name) => name.clone(),
+                            ObjCMethodReceiver::Protocol(name) => format!("id<{}>", name),
+                        };
+
+                        if must_be_writable
+                            && self
+                                .resolve_property(
+                                    &receiver.to_ref(),
+                                    &name,
+                                    is_class_property,
+                                    false,
+                                )
+                                .is_some()
+                        {
                             return Err(Error::at_loc(
                                 self.full_file_path(),
-                                self_token,
-                                "`self` can only be used in an impl or trait linked to an ObjC interface or protocol",
-                            ))
+                                span,
+                                format!(
+                                    "{kind} property \"{name}\" on {receiver} is not writable",
+                                    kind = kind,
+                                    receiver = receiver_name,
+                                    name = name,
+                                ),
+                            ));
+                        } else {
+                            return Err(Error::at_loc(
+                                self.full_file_path(),
+                                span,
+                                format!(
+                                    "could not find {kind} property \"{name}\" on {receiver}",
+                                    kind = kind,
+                                    receiver = receiver_name,
+                                    name = name,
+                                ),
+                            ));
                         }
-                    },
-                    ObjCMacroReceiver::Class(name) => ObjCMethodReceiver::Interface(name.to_string()),
-                    ObjCMacroReceiver::MethodCall(_) => todo!(),
+                    }
                 };
-                let _resolved =
-                    self.resolve_method(&receiver.to_ref(), &sel, method_kind, call.span());
             }
-            ObjCExpr::PropertyGet(_) => todo!(),
-            ObjCExpr::PropertySet(_) => todo!(),
         }
         Ok(())
     }
