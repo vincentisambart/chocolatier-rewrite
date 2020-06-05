@@ -2,5 +2,5 @@
 
 #[objc_core]
 mod core;
-#[objc_framework = "Foundation"]
-mod foundation;
+// #[objc_framework = "Foundation"]
+// mod foundation;

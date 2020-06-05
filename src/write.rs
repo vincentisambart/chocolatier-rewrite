@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
-pub fn write_crate(dst_path: &Path, content: &Vec<ModContent>) -> Result<()> {
+pub fn write_crate(dst_path: &Path, content: &[ModContent]) -> Result<()> {
     let file_paths: Vec<_> = content
         .iter()
         .map(|mod_content| dst_path.join(&mod_content.file_rel_path))

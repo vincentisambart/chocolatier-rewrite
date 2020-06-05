@@ -29,7 +29,7 @@ enum ObjCMethodReceiver {
 }
 
 impl ObjCMethodReceiver {
-    fn to_ref<'a>(&'a self) -> ObjCMethodReceiverRef<'a> {
+    fn to_ref(&'_ self) -> ObjCMethodReceiverRef<'_> {
         match self {
             Self::Interface(interf) => ObjCMethodReceiverRef::Interface(interf),
             Self::Protocol(protoc) => ObjCMethodReceiverRef::Protocol(protoc),
@@ -107,8 +107,7 @@ impl<'a> ObjCResolver<'a> {
 
                 def.methods
                     .iter()
-                    .filter(|method| method.kind == method_kind && method.name == selector)
-                    .next()
+                    .find(|method| method.kind == method_kind && method.name == selector)
                     .map(|method| ResolvedObjCMethod {
                         receiver: receiver.to_owned(),
                         method: method.clone(),
@@ -133,10 +132,9 @@ impl<'a> ObjCResolver<'a> {
 
                 def.methods
                     .iter()
-                    .filter(|method| {
+                    .find(|method| {
                         method.method.kind == method_kind && method.method.name == selector
                     })
-                    .next()
                     .map(|method| ResolvedObjCMethod {
                         receiver: receiver.to_owned(),
                         method: method.method.clone(),
@@ -183,12 +181,11 @@ impl<'a> ObjCResolver<'a> {
 
                 def.properties
                     .iter()
-                    .filter(|prop| {
+                    .find(|prop| {
                         prop.is_class == is_class
                             && (!must_be_writable || prop.is_writable)
                             && prop.name == name
                     })
-                    .next()
                     .map(|prop| ResolvedObjCProperty {
                         receiver: receiver.to_owned(),
                         property: prop.clone(),
@@ -214,12 +211,11 @@ impl<'a> ObjCResolver<'a> {
 
                 def.properties
                     .iter()
-                    .filter(|prop| {
+                    .find(|prop| {
                         prop.property.is_class == is_class
                             && (!must_be_writable || prop.property.is_writable)
                             && prop.property.name == name
                     })
-                    .next()
                     .map(|prop| ResolvedObjCProperty {
                         receiver: receiver.to_owned(),
                         property: prop.property.clone(),
