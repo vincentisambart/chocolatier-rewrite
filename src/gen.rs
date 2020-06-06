@@ -1,11 +1,14 @@
 use crate::common::{Error, ModPath, Result};
-use crate::parse::{ObjCExpr, ObjCMacroReceiver};
+use crate::parse::{ObjCExpr, ObjCMacroReceiver, ObjCMethodParam, ObjCMethodParams};
 use crate::read::ModContent;
-use crate::skel::{Index, ObjCEntity, Overview, RustEntityPath};
+use crate::skel::{Index, ObjCEntity, ObjCOrigin, Overview, RustEntityPath};
 use chocolatier_objc_parser::{ast as objc_ast, index as objc_index};
 use objc_ast::ObjCMethodKind;
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote, ToTokens};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use syn::parse_quote;
 use syn::spanned::Spanned;
 use syn::visit_mut::VisitMut;
 
@@ -80,6 +83,12 @@ impl ResolvedCallable {
             },
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfKind {
+    Class,
+    Instance,
 }
 
 struct ObjCResolver<'a> {
@@ -272,17 +281,14 @@ impl<'a> ObjCResolver<'a> {
         &self,
         objc_expr: &ObjCExpr,
         objc_entity: Option<&ObjCEntity>,
-        rust_method_has_receiver: Option<bool>,
+        self_kind: Option<SelfKind>,
     ) -> Result<ResolvedCallable> {
         let method_kind = match objc_expr.receiver() {
-            ObjCMacroReceiver::SelfValue(token) => match rust_method_has_receiver {
-                Some(has_receiver) => {
-                    if has_receiver {
-                        ObjCMethodKind::Instance
-                    } else {
-                        ObjCMethodKind::Class
-                    }
-                }
+            ObjCMacroReceiver::SelfValue(token) => match self_kind {
+                Some(self_kind) => match self_kind {
+                    SelfKind::Class => ObjCMethodKind::Class,
+                    SelfKind::Instance => ObjCMethodKind::Instance,
+                },
                 None => {
                     return Err(Error::at_loc(
                         self.full_file_path(),
@@ -408,6 +414,68 @@ impl<'a> ObjCResolver<'a> {
     }
 }
 
+fn rust_param_conv(
+    core_mod_path: &ModPath,
+    rust_objc_param: &ObjCMethodParam,
+    objc_param: &objc_ast::ObjCParam,
+) -> syn::Expr {
+    let expr = &rust_objc_param.expr;
+    match &objc_param.ty.ty {
+        objc_ast::Type::ObjPtr(ptr) => {
+            let mut restric: Vec<TokenStream> = Vec::new();
+            restric.push(quote! { #core_mod_path::ObjCPtr });
+            match &ptr.kind {
+                objc_ast::ObjPtrKind::Class => todo!(),
+                objc_ast::ObjPtrKind::Id(id) => {
+                    restric.extend(
+                        id.protocols
+                            .iter()
+                            .map(|protoc| format_ident!("{}Protocol", protoc).to_token_stream()),
+                    );
+                }
+                objc_ast::ObjPtrKind::SomeInstance(desc) => {
+                    restric.push(format_ident!("{}Interface", desc.interface).to_token_stream());
+                    restric.extend(
+                        desc.protocols
+                            .iter()
+                            .map(|protoc| format_ident!("{}Protocol", protoc).to_token_stream()),
+                    );
+                }
+                objc_ast::ObjPtrKind::Block(_) => todo!(),
+                objc_ast::ObjPtrKind::TypeParam(_) => todo!(),
+            };
+            let is_consumed = objc_param.attrs.contains(&objc_ast::Attr::NSConsumed);
+            match ptr.nullability {
+                Some(objc_ast::Nullability::NonNull) => {
+                    let received_ty = if is_consumed {
+                        quote! { T }
+                    } else {
+                        quote! { &T }
+                    };
+                    parse_quote! {
+                        ({fn conv<T: #(#restric)+*>(ptr: #received_ty) -> std::ptr::NonNull<#core_mod_path::ObjCObject> {
+                            ptr.as_raw()
+                        }; conv})(#expr)
+                    }
+                }
+                Some(objc_ast::Nullability::Nullable) | None => {
+                    let received_ty = if is_consumed {
+                        quote! { Option<T> }
+                    } else {
+                        quote! { Option<&T> }
+                    };
+                    parse_quote! {
+                        ({fn conv<T: #(#restric)+*>(ptr: #received_ty) -> *mut #core_mod_path::ObjCObject {
+                            ptr.map_or(std::ptr::null_mut(), |ptr| ptr.as_raw().as_ptr())
+                        }; conv})(#expr)
+                    }
+                }
+            }
+        }
+        _ => todo!(),
+    }
+}
+
 const UNKNOWN_ORIGIN: &str = "_";
 const ORIGIN_CORE: &str = "core";
 const ORIGIN_SYSTEM: &str = "system";
@@ -454,11 +522,25 @@ fn c_func_name(objc_index: &objc_index::TypeIndex, callable: &ResolvedCallable) 
     )
 }
 
+impl ToTokens for ModPath {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        use proc_macro2::{Ident, Span};
+        let segments = self
+            .0
+            .iter()
+            .map(|segment| Ident::new(segment, Span::call_site()));
+        tokens.extend(quote!(crate::#(#segments)::*))
+    }
+}
+
 fn replacement_expr(
+    index: &Index,
     objc_index: &objc_index::TypeIndex,
     objc_expr: &ObjCExpr,
     callable: &ResolvedCallable,
+    self_kind: Option<SelfKind>,
 ) -> Result<syn::Expr> {
+    let core_mod_path = index.mod_per_objc_origin.get(&ObjCOrigin::Core).unwrap();
     let c_func_name = c_func_name(objc_index, callable);
     let c_func_name_span = match objc_expr {
         ObjCExpr::MethodCall(call) => call.span(),
@@ -466,8 +548,47 @@ fn replacement_expr(
         ObjCExpr::PropertySet(set) => set.property_name.span(),
     };
     let c_func_ident = proc_macro2::Ident::new(&c_func_name, c_func_name_span);
-    Ok(syn::parse_quote! {
-       #c_func_ident()
+
+    let mut params: Vec<syn::Expr> = Vec::new();
+
+    match callable.method_kind() {
+        ObjCMethodKind::Class => match &objc_expr.receiver() {
+            ObjCMacroReceiver::SelfValue(_) => match self_kind {
+                Some(SelfKind::Class) => {
+                    params.push(parse_quote!(<Self as #core_mod_path::ObjCPtr>::class()))
+                }
+                Some(SelfKind::Instance) => todo!(),
+                None => unreachable!(),
+            },
+            ObjCMacroReceiver::Class(_) => todo!(),
+            ObjCMacroReceiver::MethodCall(_) => todo!(),
+        },
+        ObjCMethodKind::Instance => {
+            params.push(parse_quote!(<Self as #core_mod_path::ObjCPtr>::as_raw(self)))
+        }
+    }
+
+    match &objc_expr {
+        ObjCExpr::MethodCall(call) => match &call.params {
+            ObjCMethodParams::Without(_) => {}
+            ObjCMethodParams::With(mac_params) => match callable {
+                ResolvedCallable::Method(method) => {
+                    assert_eq!(mac_params.len(), method.method.params.len());
+                    params.extend(mac_params.iter().zip(method.method.params.iter()).map(
+                        |(rust_objc_param, objc_param)| {
+                            rust_param_conv(core_mod_path, rust_objc_param, objc_param)
+                        },
+                    ));
+                }
+                ResolvedCallable::Property(_) => todo!(),
+            },
+        },
+        ObjCExpr::PropertyGet(_) => {}
+        ObjCExpr::PropertySet(_) => todo!(),
+    }
+
+    Ok(parse_quote! {
+       #c_func_ident(#(#params),*)
     })
 }
 
@@ -493,10 +614,21 @@ impl ObjCMacroVisit<'_> {
         let objc_expr: ObjCExpr = expr_mac.mac.parse_body().map_err(|err| self.syn_err(err))?;
 
         let resolver = ObjCResolver::new(self.objc_index, self.base_dir, self.file_rel_path);
-        let resolved =
-            resolver.resolve(&objc_expr, self.objc_entity, self.rust_method_has_receiver)?;
+        let self_kind = self
+            .rust_method_has_receiver
+            .map(|has_receiver| match has_receiver {
+                true => SelfKind::Instance,
+                false => SelfKind::Class,
+            });
+        let resolved = resolver.resolve(&objc_expr, self.objc_entity, self_kind)?;
 
-        replacement_expr(self.objc_index, &objc_expr, &resolved)
+        replacement_expr(
+            self.index,
+            self.objc_index,
+            &objc_expr,
+            &resolved,
+            self_kind,
+        )
     }
 }
 
