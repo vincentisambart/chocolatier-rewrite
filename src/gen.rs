@@ -4,6 +4,7 @@ use crate::read::ModContent;
 use crate::skel::{Index, ObjCEntity, Overview, RustEntityPath};
 use chocolatier_objc_parser::{ast as objc_ast, index as objc_index};
 use objc_ast::ObjCMethodKind;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use syn::visit_mut::VisitMut;
@@ -38,15 +39,47 @@ impl ObjCMethodReceiver {
 }
 
 #[derive(Debug)]
-struct ResolvedObjCMethod {
+struct ResolvedMethod {
     receiver: ObjCMethodReceiver,
     method: objc_ast::ObjCMethod,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropertyAccess {
+    Read,
+    Write,
+}
+
 #[derive(Debug)]
-struct ResolvedObjCProperty {
+struct ResolvedProperty {
     receiver: ObjCMethodReceiver,
     property: objc_ast::Property,
+    access: PropertyAccess,
+}
+
+#[derive(Debug)]
+enum ResolvedCallable {
+    Method(ResolvedMethod),
+    Property(ResolvedProperty),
+}
+
+impl ResolvedCallable {
+    fn receiver(&self) -> &ObjCMethodReceiver {
+        match self {
+            ResolvedCallable::Method(method) => &method.receiver,
+            ResolvedCallable::Property(property) => &property.receiver,
+        }
+    }
+
+    fn method_kind(&self) -> ObjCMethodKind {
+        match self {
+            ResolvedCallable::Method(method) => method.method.kind,
+            ResolvedCallable::Property(property) => match property.property.is_class {
+                true => ObjCMethodKind::Class,
+                false => ObjCMethodKind::Instance,
+            },
+        }
+    }
 }
 
 struct ObjCResolver<'a> {
@@ -78,7 +111,7 @@ impl<'a> ObjCResolver<'a> {
         receiver: &ObjCMethodReceiverRef<'_>,
         selector: &str,
         method_kind: ObjCMethodKind,
-    ) -> Option<ResolvedObjCMethod> {
+    ) -> Option<ResolvedMethod> {
         match *receiver {
             ObjCMethodReceiverRef::Interface(interf) => {
                 // Here we should not be given an non existing type, so just panic if we cannot find it.
@@ -108,7 +141,7 @@ impl<'a> ObjCResolver<'a> {
                 def.methods
                     .iter()
                     .find(|method| method.kind == method_kind && method.name == selector)
-                    .map(|method| ResolvedObjCMethod {
+                    .map(|method| ResolvedMethod {
                         receiver: receiver.to_owned(),
                         method: method.clone(),
                     })
@@ -135,7 +168,7 @@ impl<'a> ObjCResolver<'a> {
                     .find(|method| {
                         method.method.kind == method_kind && method.method.name == selector
                     })
-                    .map(|method| ResolvedObjCMethod {
+                    .map(|method| ResolvedMethod {
                         receiver: receiver.to_owned(),
                         method: method.method.clone(),
                     })
@@ -148,9 +181,18 @@ impl<'a> ObjCResolver<'a> {
         &self,
         receiver: &ObjCMethodReceiverRef<'_>,
         name: &str,
-        is_class: bool,
-        must_be_writable: bool,
-    ) -> Option<ResolvedObjCProperty> {
+        method_kind: ObjCMethodKind,
+        access: PropertyAccess,
+    ) -> Option<ResolvedProperty> {
+        let must_be_writable = match access {
+            PropertyAccess::Read => false,
+            PropertyAccess::Write => true,
+        };
+        let is_class_property = match method_kind {
+            ObjCMethodKind::Class => true,
+            ObjCMethodKind::Instance => false,
+        };
+
         match *receiver {
             ObjCMethodReceiverRef::Interface(interf) => {
                 // Here we should not be given an non existing type, so just panic if we cannot find it.
@@ -162,8 +204,8 @@ impl<'a> ObjCResolver<'a> {
                     self.resolve_property(
                         &ObjCMethodReceiverRef::Interface(superclass),
                         name,
-                        is_class,
-                        must_be_writable,
+                        method_kind,
+                        access,
                     )
                 }) {
                     return Some(resolved);
@@ -172,8 +214,8 @@ impl<'a> ObjCResolver<'a> {
                     self.resolve_property(
                         &ObjCMethodReceiverRef::Protocol(protoc),
                         name,
-                        is_class,
-                        must_be_writable,
+                        method_kind,
+                        access,
                     )
                 }) {
                     return Some(resolved);
@@ -182,13 +224,14 @@ impl<'a> ObjCResolver<'a> {
                 def.properties
                     .iter()
                     .find(|prop| {
-                        prop.is_class == is_class
+                        prop.is_class == is_class_property
                             && (!must_be_writable || prop.is_writable)
                             && prop.name == name
                     })
-                    .map(|prop| ResolvedObjCProperty {
+                    .map(|prop| ResolvedProperty {
                         receiver: receiver.to_owned(),
                         property: prop.clone(),
+                        access,
                     })
             }
             ObjCMethodReceiverRef::Protocol(protoc) => {
@@ -202,8 +245,8 @@ impl<'a> ObjCResolver<'a> {
                     self.resolve_property(
                         &ObjCMethodReceiverRef::Protocol(protoc),
                         name,
-                        is_class,
-                        must_be_writable,
+                        method_kind,
+                        access,
                     )
                 }) {
                     return Some(resolved);
@@ -212,13 +255,14 @@ impl<'a> ObjCResolver<'a> {
                 def.properties
                     .iter()
                     .find(|prop| {
-                        prop.property.is_class == is_class
+                        prop.property.is_class == is_class_property
                             && (!must_be_writable || prop.property.is_writable)
                             && prop.property.name == name
                     })
-                    .map(|prop| ResolvedObjCProperty {
+                    .map(|prop| ResolvedProperty {
                         receiver: receiver.to_owned(),
                         property: prop.property.clone(),
+                        access,
                     })
             }
         }
@@ -229,7 +273,7 @@ impl<'a> ObjCResolver<'a> {
         objc_expr: &ObjCExpr,
         objc_entity: Option<&ObjCEntity>,
         rust_method_has_receiver: Option<bool>,
-    ) -> Result<()> {
+    ) -> Result<ResolvedCallable> {
         let method_kind = match objc_expr.receiver() {
             ObjCMacroReceiver::SelfValue(token) => match rust_method_has_receiver {
                 Some(has_receiver) => {
@@ -277,7 +321,7 @@ impl<'a> ObjCResolver<'a> {
         match objc_expr {
             ObjCExpr::MethodCall(call) => {
                 let sel = call.selector();
-                let _resolved = match self.resolve_method(&receiver.to_ref(), &sel, method_kind) {
+                let resolved = match self.resolve_method(&receiver.to_ref(), &sel, method_kind) {
                     Some(resolved) => resolved,
                     None => {
                         let kind = match method_kind {
@@ -300,75 +344,131 @@ impl<'a> ObjCResolver<'a> {
                         ));
                     }
                 };
+                Ok(ResolvedCallable::Method(resolved))
             }
             ObjCExpr::PropertyGet(_) | ObjCExpr::PropertySet(_) => {
-                let (property_name, must_be_writable) = match objc_expr {
+                let (property_name, access) = match objc_expr {
                     ObjCExpr::MethodCall(_) => unreachable!(),
-                    ObjCExpr::PropertyGet(get) => (&get.property_name, false),
-                    ObjCExpr::PropertySet(set) => (&set.property_name, true),
+                    ObjCExpr::PropertyGet(get) => (&get.property_name, PropertyAccess::Read),
+                    ObjCExpr::PropertySet(set) => (&set.property_name, PropertyAccess::Write),
                 };
                 let name = property_name.to_string();
-                let is_class_property = match method_kind {
-                    ObjCMethodKind::Class => true,
-                    ObjCMethodKind::Instance => false,
-                };
                 let span = property_name.span();
 
-                let _resolved = match self.resolve_property(
-                    &receiver.to_ref(),
-                    &name,
-                    is_class_property,
-                    must_be_writable,
-                ) {
-                    Some(resolved) => resolved,
-                    None => {
-                        let kind = match method_kind {
-                            ObjCMethodKind::Class => "class",
-                            ObjCMethodKind::Instance => "instance",
-                        };
-                        let receiver_name = match &receiver {
-                            ObjCMethodReceiver::Interface(name) => name.clone(),
-                            ObjCMethodReceiver::Protocol(name) => format!("id<{}>", name),
-                        };
+                let resolved =
+                    match self.resolve_property(&receiver.to_ref(), &name, method_kind, access) {
+                        Some(resolved) => resolved,
+                        None => {
+                            let kind = match method_kind {
+                                ObjCMethodKind::Class => "class",
+                                ObjCMethodKind::Instance => "instance",
+                            };
+                            let receiver_name = match &receiver {
+                                ObjCMethodReceiver::Interface(name) => name.clone(),
+                                ObjCMethodReceiver::Protocol(name) => format!("id<{}>", name),
+                            };
 
-                        if must_be_writable
-                            && self
-                                .resolve_property(
-                                    &receiver.to_ref(),
-                                    &name,
-                                    is_class_property,
-                                    false,
-                                )
-                                .is_some()
-                        {
-                            return Err(Error::at_loc(
-                                self.full_file_path(),
-                                span,
-                                format!(
-                                    "{kind} property \"{name}\" on {receiver} is not writable",
-                                    kind = kind,
-                                    receiver = receiver_name,
-                                    name = name,
-                                ),
-                            ));
-                        } else {
-                            return Err(Error::at_loc(
-                                self.full_file_path(),
-                                span,
-                                format!(
-                                    "could not find {kind} property \"{name}\" on {receiver}",
-                                    kind = kind,
-                                    receiver = receiver_name,
-                                    name = name,
-                                ),
-                            ));
+                            if access == PropertyAccess::Write
+                                && self
+                                    .resolve_property(
+                                        &receiver.to_ref(),
+                                        &name,
+                                        method_kind,
+                                        PropertyAccess::Read,
+                                    )
+                                    .is_some()
+                            {
+                                return Err(Error::at_loc(
+                                    self.full_file_path(),
+                                    span,
+                                    format!(
+                                        "{kind} property \"{name}\" on {receiver} is not writable",
+                                        kind = kind,
+                                        receiver = receiver_name,
+                                        name = name,
+                                    ),
+                                ));
+                            } else {
+                                return Err(Error::at_loc(
+                                    self.full_file_path(),
+                                    span,
+                                    format!(
+                                        "could not find {kind} property \"{name}\" on {receiver}",
+                                        kind = kind,
+                                        receiver = receiver_name,
+                                        name = name,
+                                    ),
+                                ));
+                            }
                         }
-                    }
-                };
+                    };
+                Ok(ResolvedCallable::Property(resolved))
             }
         }
-        Ok(())
     }
+}
+
+const UNKNOWN_ORIGIN: &str = "_";
+const ORIGIN_CORE: &str = "core";
+const ORIGIN_SYSTEM: &str = "system";
+
+fn c_func_name(objc_index: &objc_index::TypeIndex, callable: &ResolvedCallable) -> String {
+    use objc_ast::Origin;
+
+    let (receiver_name, origin, receiver_kind_name) = match callable.receiver() {
+        ObjCMethodReceiver::Interface(name) => {
+            let origin = objc_index.interfaces.get(name).unwrap().origin.clone();
+            (name, origin, "Protocol")
+        }
+        ObjCMethodReceiver::Protocol(name) => {
+            let origin = objc_index.protocols.get(name).unwrap().origin.clone();
+            (name, origin, "Interface")
+        }
+    };
+    let method_kind = callable.method_kind();
+    let origin_name = match &origin {
+        None => UNKNOWN_ORIGIN,
+        Some(Origin::ObjCCore) => ORIGIN_CORE,
+        Some(Origin::System) => ORIGIN_SYSTEM,
+        Some(Origin::Framework(framework)) => framework.as_str(),
+        Some(Origin::Library(lib)) => lib.as_str(),
+    };
+    let method_kind_name = match method_kind {
+        ObjCMethodKind::Class => "class",
+        ObjCMethodKind::Instance => "instance",
+    };
+    let escaped_sel = match callable {
+        ResolvedCallable::Method(method) => Cow::Owned(method.method.name.replace(":", "_")),
+        ResolvedCallable::Property(property) => Cow::Borrowed(&property.property.name),
+    };
+
+    // TODO: Also add the name of the crate generating the code.
+
+    format!(
+        "choco_{origin_name}_{receiver_name}{receiver_kind_name}_{method_kind_name}_{escaped_sel}",
+        origin_name = origin_name,
+        receiver_name = receiver_name,
+        receiver_kind_name = receiver_kind_name,
+        method_kind_name = method_kind_name,
+        escaped_sel = escaped_sel
+    )
+}
+
+fn replacement_expr(
+    objc_index: &objc_index::TypeIndex,
+    objc_expr: &ObjCExpr,
+    callable: &ResolvedCallable,
+) -> Result<syn::Expr> {
+    let c_func_name = c_func_name(objc_index, callable);
+    let c_func_name_span = match objc_expr {
+        ObjCExpr::MethodCall(call) => call.span(),
+        ObjCExpr::PropertyGet(get) => get.property_name.span(),
+        ObjCExpr::PropertySet(set) => set.property_name.span(),
+    };
+    let c_func_ident = proc_macro2::Ident::new(&c_func_name, c_func_name_span);
+    Ok(syn::parse_quote! {
+       #c_func_ident()
+    })
 }
 
 struct ObjCMacroVisit<'a> {
@@ -393,9 +493,10 @@ impl ObjCMacroVisit<'_> {
         let objc_expr: ObjCExpr = expr_mac.mac.parse_body().map_err(|err| self.syn_err(err))?;
 
         let resolver = ObjCResolver::new(self.objc_index, self.base_dir, self.file_rel_path);
-        resolver.resolve(&objc_expr, self.objc_entity, self.rust_method_has_receiver)?;
+        let resolved =
+            resolver.resolve(&objc_expr, self.objc_entity, self.rust_method_has_receiver)?;
 
-        Ok(syn::Expr::Macro(expr_mac.clone()))
+        replacement_expr(self.objc_index, &objc_expr, &resolved)
     }
 }
 

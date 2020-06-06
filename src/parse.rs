@@ -149,6 +149,7 @@ pub struct ObjCPropertySet {
 // - objc!(self.myInstanceProperty)
 // - objc!(Self.myClassProperty)
 // - objc!(self.myInstanceProperty = 1)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ObjCExpr {
     MethodCall(ObjCMethodCall),

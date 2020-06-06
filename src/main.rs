@@ -1,5 +1,6 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::assertions_on_constants)]
+#![allow(clippy::match_bool)] // already downgraded to pedantic on clippy master
 
 mod common;
 mod gen;
