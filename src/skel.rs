@@ -383,6 +383,17 @@ impl RustEntityPath {
     }
 }
 
+impl quote::ToTokens for RustEntityPath {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        use proc_macro2::{Ident, Span};
+        use quote::quote;
+
+        let ident = Ident::new(&self.name, Span::call_site());
+        let mod_path = &self.mod_path;
+        tokens.extend(quote!(#mod_path::#ident))
+    }
+}
+
 impl std::fmt::Display for RustEntityPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}::{}", self.mod_path, self.name)

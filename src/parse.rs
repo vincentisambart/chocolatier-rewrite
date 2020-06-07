@@ -165,6 +165,14 @@ impl ObjCExpr {
             Self::PropertySet(set) => &set.receiver,
         }
     }
+
+    pub fn call_span(&self) -> proc_macro2::Span {
+        match self {
+            Self::MethodCall(call) => call.span(),
+            Self::PropertyGet(get) => get.property_name.span(),
+            Self::PropertySet(set) => set.property_name.span(),
+        }
+    }
 }
 
 impl Parse for ObjCExpr {

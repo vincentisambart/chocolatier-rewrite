@@ -581,6 +581,8 @@ fn replacement_expr(
     index: &Index,
     objc_index: &objc_index::TypeIndex,
     objc_expr: &ObjCExpr,
+    base_dir: &Path,
+    file_rel_path: &Path,
     callable: &ResolvedCallable,
     self_kind: Option<SelfKind>,
 ) -> Result<syn::Expr> {
@@ -631,9 +633,63 @@ fn replacement_expr(
         ObjCExpr::PropertySet(_) => todo!(),
     }
 
-    Ok(parse_quote! {
+    let func_call: syn::Expr = parse_quote! {
        #c_func_ident(#(#params),*)
-    })
+    };
+
+    let result_ty = match &callable {
+        ResolvedCallable::Method(method) => Some(&method.method.result),
+        ResolvedCallable::Property(property) => match property.access {
+            PropertyAccess::Read => Some(&property.property.value),
+            PropertyAccess::Write => None,
+        },
+    };
+
+    let converted_ret: syn::Expr = match result_ty {
+        Some(ty) => match &ty.ty {
+            objc_ast::Type::Void => func_call,
+            objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
+                "BOOL" => parse_quote!(#func_call != 0),
+                "instancetype" => parse_quote! {
+                    <Self as #core_mod_path::ObjCPtr>::from_raw_unchecked(#func_call)
+                },
+                "NSUInteger" | "NSInteger" => func_call,
+                _ => todo!("unhandled typedef {:?}", ty),
+            },
+            objc_ast::Type::ObjPtr(ptr) => {
+                use objc_ast::ObjPtrKind;
+                match &ptr.kind {
+                    ObjPtrKind::Class => func_call,
+                    ObjPtrKind::Id(_) => todo!(),
+                    ObjPtrKind::SomeInstance(instance) => {
+                        match index.interf_structs.get(&instance.interface) {
+                            Some(loc) => {
+                                let path = &loc.path;
+                                parse_quote! {
+                                    <#path as #core_mod_path::ObjCPtr>::from_raw_unchecked(#func_call)
+                                }
+                            }
+                            None => {
+                                let file_path = base_dir.join(file_rel_path);
+                                let message = format!("could not find Rust concrete type for return value @interface {}", instance.interface);
+                                return Err(Error::at_loc(
+                                    file_path,
+                                    objc_expr.call_span(),
+                                    message,
+                                ));
+                            }
+                        }
+                    }
+                    ObjPtrKind::Block(_) => todo!(),
+                    ObjPtrKind::TypeParam(_) => todo!(),
+                }
+            }
+            _ => todo!("unhandled type {:?}", ty),
+        },
+        None => func_call,
+    };
+
+    Ok(converted_ret)
 }
 
 struct ObjCMacroVisit<'a> {
@@ -670,6 +726,8 @@ impl ObjCMacroVisit<'_> {
             self.index,
             self.objc_index,
             &objc_expr,
+            self.base_dir,
+            self.file_rel_path,
             &resolved,
             self_kind,
         )
