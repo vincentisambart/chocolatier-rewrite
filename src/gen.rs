@@ -137,18 +137,40 @@ impl<'a> ObjCResolver<'a> {
                 }) {
                     return Some(resolved);
                 }
-                if let Some(resolved) = def.adopted_protocols.iter().find_map(|protoc| {
-                    self.resolve_method(
-                        &ObjCMethodReceiverRef::Protocol(protoc),
-                        selector,
-                        method_kind,
-                    )
-                }) {
+                if let Some(resolved) =
+                    def.adopted_protocols
+                        .iter()
+                        .chain(self.objc_index.categories.get(interf).iter().flat_map(
+                            |categories| {
+                                categories
+                                    .iter()
+                                    .flat_map(|categ_def| categ_def.adopted_protocols.iter())
+                            },
+                        ))
+                        .find_map(|protoc| {
+                            self.resolve_method(
+                                &ObjCMethodReceiverRef::Protocol(protoc),
+                                selector,
+                                method_kind,
+                            )
+                        })
+                {
                     return Some(resolved);
                 }
 
                 def.methods
                     .iter()
+                    .chain(
+                        self.objc_index
+                            .categories
+                            .get(interf)
+                            .iter()
+                            .flat_map(|categories| {
+                                categories
+                                    .iter()
+                                    .flat_map(|categ_def| categ_def.methods.iter())
+                            }),
+                    )
                     .find(|method| method.kind == method_kind && method.name == selector)
                     .map(|method| ResolvedMethod {
                         receiver: receiver.to_owned(),
@@ -219,19 +241,41 @@ impl<'a> ObjCResolver<'a> {
                 }) {
                     return Some(resolved);
                 }
-                if let Some(resolved) = def.adopted_protocols.iter().find_map(|protoc| {
-                    self.resolve_property(
-                        &ObjCMethodReceiverRef::Protocol(protoc),
-                        name,
-                        method_kind,
-                        access,
-                    )
-                }) {
+                if let Some(resolved) =
+                    def.adopted_protocols
+                        .iter()
+                        .chain(self.objc_index.categories.get(interf).iter().flat_map(
+                            |categories| {
+                                categories
+                                    .iter()
+                                    .flat_map(|categ_def| categ_def.adopted_protocols.iter())
+                            },
+                        ))
+                        .find_map(|protoc| {
+                            self.resolve_property(
+                                &ObjCMethodReceiverRef::Protocol(protoc),
+                                name,
+                                method_kind,
+                                access,
+                            )
+                        })
+                {
                     return Some(resolved);
                 }
 
                 def.properties
                     .iter()
+                    .chain(
+                        self.objc_index
+                            .categories
+                            .get(interf)
+                            .iter()
+                            .flat_map(|categories| {
+                                categories
+                                    .iter()
+                                    .flat_map(|categ_def| categ_def.properties.iter())
+                            }),
+                    )
                     .find(|prop| {
                         prop.is_class == is_class_property
                             && (!must_be_writable || prop.is_writable)
