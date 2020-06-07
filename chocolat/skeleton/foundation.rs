@@ -21,7 +21,7 @@ pub trait NSStringInterface {
     }
 
     fn char_at(&self, index: usize) -> u16 {
-        objc!([self charAtIndex:index])
+        objc!([self characterAtIndex:index])
     }
 
     fn len(&self) -> usize {

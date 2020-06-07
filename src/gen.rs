@@ -342,7 +342,7 @@ impl<'a> ObjCResolver<'a> {
                 }
             },
             ObjCMacroReceiver::Class(_) => ObjCMethodKind::Class,
-            ObjCMacroReceiver::MethodCall(_) => todo!(),
+            ObjCMacroReceiver::MethodCall(call) => todo!("unsupported method call {:#?}", call),
         };
         let receiver = match objc_expr.receiver() {
             ObjCMacroReceiver::SelfValue(self_token) => match objc_entity {
@@ -459,12 +459,14 @@ impl<'a> ObjCResolver<'a> {
 }
 
 fn rust_param_conv(
+    objc_index: &objc_index::TypeIndex,
     core_mod_path: &ModPath,
     rust_objc_param: &ObjCMethodParam,
     objc_param: &objc_ast::ObjCParam,
+    ty: &objc_ast::AttributedType,
 ) -> syn::Expr {
     let expr = &rust_objc_param.expr;
-    match &objc_param.ty.ty {
+    match &ty.ty {
         objc_ast::Type::ObjPtr(ptr) => {
             let mut restric: Vec<TokenStream> = Vec::new();
             restric.push(quote! { #core_mod_path::ObjCPtr });
@@ -516,8 +518,87 @@ fn rust_param_conv(
                 }
             }
         }
-        _ => todo!(),
+        objc_ast::Type::Num(_) => expr.clone(),
+        objc_ast::Type::Typedef(typedef) => {
+            let decl = objc_index.typedefs.get(&typedef.name).unwrap();
+            rust_param_conv(
+                objc_index,
+                core_mod_path,
+                rust_objc_param,
+                objc_param,
+                &decl.underlying,
+            )
+        }
+        _ => todo!("unsupported param type {:?}", ty),
     }
+}
+
+fn rust_ret_conv(
+    index: &Index,
+    objc_index: &objc_index::TypeIndex,
+    core_mod_path: &ModPath,
+    func_call: syn::Expr,
+    ty: &objc_ast::AttributedType,
+    base_dir: &Path,
+    file_rel_path: &Path,
+    span: proc_macro2::Span,
+) -> Result<syn::Expr> {
+    let conv: syn::Expr = match &ty.ty {
+        objc_ast::Type::Void => func_call,
+        objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
+            "BOOL" => parse_quote!(#func_call != 0),
+            "instancetype" => parse_quote! {
+                <Self as #core_mod_path::ObjCPtr>::from_raw_unchecked(#func_call)
+            },
+            _ => {
+                let decl = objc_index.typedefs.get(&typedef.name).unwrap();
+                rust_ret_conv(
+                    index,
+                    objc_index,
+                    core_mod_path,
+                    func_call,
+                    &decl.underlying,
+                    base_dir,
+                    file_rel_path,
+                    span,
+                )?
+            }
+        },
+        objc_ast::Type::ObjPtr(ptr) => {
+            use objc_ast::ObjPtrKind;
+            match &ptr.kind {
+                ObjPtrKind::Class => func_call,
+                ObjPtrKind::Id(_) => todo!(),
+                ObjPtrKind::SomeInstance(instance) => {
+                    match index.interf_structs.get(&instance.interface) {
+                        Some(loc) => {
+                            let path = &loc.path;
+                            parse_quote! {
+                                <#path as #core_mod_path::ObjCPtr>::from_raw_unchecked(#func_call)
+                            }
+                        }
+                        None => {
+                            let file_path = base_dir.join(file_rel_path);
+                            let message = format!(
+                                "could not find Rust concrete type for return value @interface {}",
+                                instance.interface
+                            );
+                            return Err(Error::at_loc(file_path, span, message));
+                        }
+                    }
+                }
+                ObjPtrKind::Block(_) => todo!(),
+                ObjPtrKind::TypeParam(_) => todo!(),
+            }
+        }
+        objc_ast::Type::Pointer(ptr) => match &ptr.pointee.ty {
+            objc_ast::Type::Num(_) => func_call,
+            _ => todo!(),
+        },
+        objc_ast::Type::Num(_) => func_call,
+        _ => todo!("unhandled type {:?}", ty),
+    };
+    Ok(conv)
 }
 
 const UNKNOWN_ORIGIN: &str = "_";
@@ -622,7 +703,13 @@ fn replacement_expr(
                     assert_eq!(mac_params.len(), method.method.params.len());
                     params.extend(mac_params.iter().zip(method.method.params.iter()).map(
                         |(rust_objc_param, objc_param)| {
-                            rust_param_conv(core_mod_path, rust_objc_param, objc_param)
+                            rust_param_conv(
+                                objc_index,
+                                core_mod_path,
+                                rust_objc_param,
+                                objc_param,
+                                &objc_param.ty,
+                            )
                         },
                     ));
                 }
@@ -646,46 +733,16 @@ fn replacement_expr(
     };
 
     let converted_ret: syn::Expr = match result_ty {
-        Some(ty) => match &ty.ty {
-            objc_ast::Type::Void => func_call,
-            objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
-                "BOOL" => parse_quote!(#func_call != 0),
-                "instancetype" => parse_quote! {
-                    <Self as #core_mod_path::ObjCPtr>::from_raw_unchecked(#func_call)
-                },
-                "NSUInteger" | "NSInteger" => func_call,
-                _ => todo!("unhandled typedef {:?}", ty),
-            },
-            objc_ast::Type::ObjPtr(ptr) => {
-                use objc_ast::ObjPtrKind;
-                match &ptr.kind {
-                    ObjPtrKind::Class => func_call,
-                    ObjPtrKind::Id(_) => todo!(),
-                    ObjPtrKind::SomeInstance(instance) => {
-                        match index.interf_structs.get(&instance.interface) {
-                            Some(loc) => {
-                                let path = &loc.path;
-                                parse_quote! {
-                                    <#path as #core_mod_path::ObjCPtr>::from_raw_unchecked(#func_call)
-                                }
-                            }
-                            None => {
-                                let file_path = base_dir.join(file_rel_path);
-                                let message = format!("could not find Rust concrete type for return value @interface {}", instance.interface);
-                                return Err(Error::at_loc(
-                                    file_path,
-                                    objc_expr.call_span(),
-                                    message,
-                                ));
-                            }
-                        }
-                    }
-                    ObjPtrKind::Block(_) => todo!(),
-                    ObjPtrKind::TypeParam(_) => todo!(),
-                }
-            }
-            _ => todo!("unhandled type {:?}", ty),
-        },
+        Some(ty) => rust_ret_conv(
+            index,
+            objc_index,
+            core_mod_path,
+            func_call,
+            &ty,
+            base_dir,
+            file_rel_path,
+            objc_expr.call_span(),
+        )?,
         None => func_call,
     };
 
