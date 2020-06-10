@@ -342,13 +342,33 @@ impl<'a> ObjCResolver<'a> {
                 }
             },
             ObjCMacroReceiver::Class(_) => ObjCMethodKind::Class,
-            ObjCMacroReceiver::MethodCall(call) => todo!("unsupported method call {:#?}", call),
+            ObjCMacroReceiver::SelfAlloc(_, call) => match self_kind {
+                // [self alloc] is an instance
+                Some(SelfKind::Class) => ObjCMethodKind::Instance,
+                _ => {
+                    return Err(Error::at_loc(
+                        self.full_file_path(),
+                        call.span(),
+                        "alloc should only be used on a class",
+                    ))
+                }
+            },
+            ObjCMacroReceiver::ClassAlloc(_, _) => ObjCMethodKind::Instance,
+            ObjCMacroReceiver::SelfClass(_, _) => ObjCMethodKind::Class,
+            ObjCMacroReceiver::SelfClassAlloc(_, _) => ObjCMethodKind::Instance,
         };
         let receiver = match objc_expr.receiver() {
-            ObjCMacroReceiver::SelfValue(self_token) => match objc_entity {
+            ObjCMacroReceiver::SelfValue(self_token)
+            | ObjCMacroReceiver::SelfAlloc(self_token, _)
+            | ObjCMacroReceiver::SelfClass(self_token, _)
+            | ObjCMacroReceiver::SelfClassAlloc(self_token, _) => match objc_entity {
                 Some(entity) => match entity {
-                    ObjCEntity::Protocol(protoc) => ObjCMethodReceiver::Protocol(protoc.to_string()),
-                    ObjCEntity::Interface(interf) => ObjCMethodReceiver::Interface(interf.to_string()),
+                    ObjCEntity::Protocol(protoc) => {
+                        ObjCMethodReceiver::Protocol(protoc.to_string())
+                    }
+                    ObjCEntity::Interface(interf) => {
+                        ObjCMethodReceiver::Interface(interf.to_string())
+                    }
                     ObjCEntity::Enum(_) => {
                         return Err(Error::at_loc(
                             self.full_file_path(),
@@ -366,7 +386,9 @@ impl<'a> ObjCResolver<'a> {
                 }
             },
             ObjCMacroReceiver::Class(name) => ObjCMethodReceiver::Interface(name.to_string()),
-            ObjCMacroReceiver::MethodCall(_) => todo!(),
+            ObjCMacroReceiver::ClassAlloc(interf, _) => {
+                ObjCMethodReceiver::Interface(interf.to_string())
+            }
         };
         match objc_expr {
             ObjCExpr::MethodCall(call) => {
@@ -688,7 +710,10 @@ fn replacement_expr(
                 None => unreachable!(),
             },
             ObjCMacroReceiver::Class(_) => todo!(),
-            ObjCMacroReceiver::MethodCall(_) => todo!(),
+            ObjCMacroReceiver::SelfAlloc(_, _) => todo!(),
+            ObjCMacroReceiver::ClassAlloc(_, _) => todo!(),
+            ObjCMacroReceiver::SelfClass(_, _) => todo!(),
+            ObjCMacroReceiver::SelfClassAlloc(_, _) => todo!(),
         },
         ObjCMethodKind::Instance => {
             params.push(parse_quote!(<Self as #core_mod_path::ObjCPtr>::as_raw(self)))

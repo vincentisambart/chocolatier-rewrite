@@ -18,7 +18,10 @@ pub enum ObjCMethodParams {
 pub enum ObjCMacroReceiver {
     SelfValue(syn::Token![self]),
     Class(syn::Ident),
-    MethodCall(Box<ObjCMethodCall>),
+    SelfClass(syn::Token![self], Box<ObjCMethodCall>),
+    SelfAlloc(syn::Token![self], Box<ObjCMethodCall>),
+    SelfClassAlloc(syn::Token![self], Box<ObjCMethodCall>),
+    ClassAlloc(syn::Ident, Box<ObjCMethodCall>),
 }
 
 impl Parse for ObjCMacroReceiver {
@@ -39,7 +42,58 @@ impl Parse for ObjCMacroReceiver {
             }
             Ok(Self::Class(ident))
         } else if lookahead.peek(syn::token::Bracket) {
-            Ok(Self::MethodCall(input.parse()?))
+            let method_call: ObjCMethodCall = input.parse()?;
+            if !matches!(&method_call.params, ObjCMethodParams::Without(sel) if sel == "alloc" || sel == "class")
+            {
+                let ident = match method_call.params {
+                    ObjCMethodParams::Without(ident) => ident,
+                    ObjCMethodParams::With(vec) => vec[0].ident.as_ref().unwrap().clone(),
+                };
+                return Err(syn::Error::new_spanned(
+                    ident,
+                    "the only nested calls allowed are calls to `alloc` or `class`",
+                ));
+            }
+            let receiver = match &method_call.receiver {
+                ObjCMacroReceiver::SelfValue(self_token) => match &method_call.params {
+                    ObjCMethodParams::Without(sel) if sel == "alloc" => {
+                        ObjCMacroReceiver::SelfAlloc(*self_token, Box::new(method_call))
+                    }
+                    ObjCMethodParams::Without(sel) if sel == "class" => {
+                        ObjCMacroReceiver::SelfClass(*self_token, Box::new(method_call))
+                    }
+                    _ => unreachable!(),
+                },
+                ObjCMacroReceiver::Class(class_ident) => match &method_call.params {
+                    ObjCMethodParams::Without(sel) if sel == "alloc" => {
+                        ObjCMacroReceiver::ClassAlloc(class_ident.clone(), Box::new(method_call))
+                    }
+                    ObjCMethodParams::Without(sel) if sel == "class" => {
+                        // `[[[NSString class] alloc] init]` is equivalent to `[[NSString alloc] init]`
+                        ObjCMacroReceiver::Class(class_ident.clone())
+                    }
+                    _ => unreachable!(),
+                },
+                ObjCMacroReceiver::SelfClass(self_token, _) => match &method_call.params {
+                    ObjCMethodParams::Without(sel) if sel == "alloc" => {
+                        ObjCMacroReceiver::SelfClassAlloc(*self_token, Box::new(method_call))
+                    }
+                    ObjCMethodParams::Without(sel) if sel == "class" => {
+                        return Err(syn::Error::new(
+                            method_call.span(),
+                            "nested calls to class do not do anything useful",
+                        ))
+                    }
+                    _ => unreachable!(),
+                },
+                _ => {
+                    return Err(syn::Error::new(
+                        method_call.span(),
+                        "nested calls to alloc are not allowed",
+                    ))
+                }
+            };
+            Ok(receiver)
         } else {
             Err(lookahead.error())
         }
@@ -177,15 +231,23 @@ impl ObjCExpr {
 
 impl Parse for ObjCExpr {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        if input.peek(syn::token::Bracket) {
+            return Ok(Self::MethodCall(input.parse()?));
+        }
+
         let receiver: ObjCMacroReceiver = input.parse()?;
 
         if !input.peek(syn::Token![.]) {
             let err_msg = "method or property name expected";
-            return match receiver {
-                ObjCMacroReceiver::SelfValue(token) => Err(syn::Error::new_spanned(token, err_msg)),
-                ObjCMacroReceiver::Class(token) => Err(syn::Error::new_spanned(token, err_msg)),
-                ObjCMacroReceiver::MethodCall(call) => Ok(Self::MethodCall(*call)),
+            let span = match receiver {
+                ObjCMacroReceiver::SelfValue(token) => token.span,
+                ObjCMacroReceiver::Class(ident) => ident.span(),
+                ObjCMacroReceiver::SelfAlloc(_, call)
+                | ObjCMacroReceiver::ClassAlloc(_, call)
+                | ObjCMacroReceiver::SelfClass(_, call)
+                | ObjCMacroReceiver::SelfClassAlloc(_, call) => call.span(),
             };
+            return Err(syn::Error::new(span, err_msg));
         }
 
         let dot_token: syn::Token![.] = input.parse()?;
@@ -233,25 +295,30 @@ mod tests {
         match &nested_call_multiparams {
             ObjCExpr::MethodCall(ObjCMethodCall {
                 bracket_token: _,
-                receiver: ObjCMacroReceiver::MethodCall(receiver),
+                receiver: ObjCMacroReceiver::SelfAlloc(_, _),
                 params: ObjCMethodParams::With(params),
-            }) => {
-                assert!(matches!(receiver.as_ref(), ObjCMethodCall {
-                    bracket_token: _,
-                    receiver: ObjCMacroReceiver::SelfValue(_),
-                    params: ObjCMethodParams::Without(method_name),
-                } if method_name == "alloc"));
-                match params.as_slice() {
-                    [param1, param2]
-                        if param1.ident.as_ref().unwrap() == "myMethod"
-                            && param2.ident.as_ref().unwrap() == "otherParam" => {}
-                    _ => panic!("unexpected expr {:?}", nested_call_multiparams),
-                }
-            }
+            }) => match params.as_slice() {
+                [param1, param2]
+                    if param1.ident.as_ref().unwrap() == "myMethod"
+                        && param2.ident.as_ref().unwrap() == "otherParam" => {}
+                _ => panic!("unexpected expr {:?}", nested_call_multiparams),
+            },
             _ => panic!("unexpected expr {:?}", nested_call_multiparams),
         }
 
         let no_method_name: syn::Result<ObjCExpr> = syn::parse_str("self");
         assert!(no_method_name.is_err());
+
+        let self_class_alloc_call: ObjCExpr = syn::parse_quote!([[[self class] alloc] init]);
+        match self_class_alloc_call {
+            ObjCExpr::MethodCall(call) => {
+                assert!(matches!(
+                    call.receiver,
+                    ObjCMacroReceiver::SelfClassAlloc(_, _)
+                ));
+                assert!(matches!(call.params, ObjCMethodParams::Without(ident) if ident == "init"));
+            }
+            _ => panic!("unexpected expr {:?}", self_class_alloc_call),
+        }
     }
 }
