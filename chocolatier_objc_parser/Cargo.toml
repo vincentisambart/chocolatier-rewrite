@@ -7,10 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clang-sys = { version = "0.29", features = ["runtime", "clang_8_0"] }
-once_cell = "1.4"
-regex = "1.3"
-tempfile = "3.1"
+clang-sys = { version = "1.1", features = ["runtime", "clang_8_0"] }
+once_cell = "1.7"
+regex = "1.4"
+tempfile = "3.2"
 bitflags = "1.2"
 libc = "0.2"
 
