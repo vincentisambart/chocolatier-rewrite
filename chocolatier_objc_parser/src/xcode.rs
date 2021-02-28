@@ -39,39 +39,51 @@ pub fn sdk_path(sdk: Sdk) -> String {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     MacOsX86_64,
+    MacOsArm64,
     IOsArm64,
     IOsSimulatorX86_64,
+    IOsSimulatorArm64,
 }
 
 impl Target {
     const MACOS_X86_64_TRIPLE: &'static str = "x86_64-apple-macos";
+    const MACOS_ARM64_TRIPLE: &'static str = "arm64-apple-macos";
     const IOS_ARM64_TRIPLE: &'static str = "arm64-apple-ios";
     const IOS_SIMULATOR_X86_64_TRIPLE: &'static str = "x86_64-apple-ios-simulator";
+    const IOS_SIMULATOR_ARM64_TRIPLE: &'static str = "arm64-apple-ios-simulator";
 
     /// Triple passed to clang.
     pub fn triple(self) -> &'static str {
         match self {
             Self::MacOsX86_64 => Self::MACOS_X86_64_TRIPLE,
+            Self::MacOsArm64 => Self::MACOS_ARM64_TRIPLE,
             Self::IOsArm64 => Self::IOS_ARM64_TRIPLE,
             Self::IOsSimulatorX86_64 => Self::IOS_SIMULATOR_X86_64_TRIPLE,
+            Self::IOsSimulatorArm64 => Self::IOS_SIMULATOR_ARM64_TRIPLE,
         }
     }
 
     fn sdk(self) -> Sdk {
         match self {
-            Self::MacOsX86_64 => Sdk::MacOs,
+            Self::MacOsX86_64 | Self::MacOsArm64 => Sdk::MacOs,
             Self::IOsArm64 => Sdk::IOs,
-            Self::IOsSimulatorX86_64 => Sdk::IOsSimulator,
+            Self::IOsSimulatorX86_64 | Self::IOsSimulatorArm64 => Sdk::IOsSimulator,
         }
     }
 
     /// All variants of the enum, used by examples to specify the target.
     /// Use the same values as Target::triple().
     pub fn variants() -> Vec<&'static str> {
-        [Self::MacOsX86_64, Self::IOsArm64, Self::IOsSimulatorX86_64]
-            .iter()
-            .map(|target| target.triple())
-            .collect()
+        [
+            Self::MacOsX86_64,
+            Self::MacOsArm64,
+            Self::IOsArm64,
+            Self::IOsSimulatorX86_64,
+            Self::IOsSimulatorArm64,
+        ]
+        .iter()
+        .map(|target| target.triple())
+        .collect()
     }
 }
 
@@ -82,8 +94,10 @@ impl std::str::FromStr for Target {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             Self::MACOS_X86_64_TRIPLE => Ok(Self::MacOsX86_64),
+            Self::MACOS_ARM64_TRIPLE => Ok(Self::MacOsArm64),
             Self::IOS_ARM64_TRIPLE => Ok(Self::IOsArm64),
             Self::IOS_SIMULATOR_X86_64_TRIPLE => Ok(Self::IOsSimulatorX86_64),
+            Self::IOS_SIMULATOR_ARM64_TRIPLE => Ok(Self::IOsSimulatorArm64),
             _ => Err("unknown target"),
         }
     }
