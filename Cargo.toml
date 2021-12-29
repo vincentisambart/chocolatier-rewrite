@@ -2,7 +2,7 @@
 name = "chocolatier"
 version = "0.1.0"
 authors = ["Vincent Isambart <vincent.isambart@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
